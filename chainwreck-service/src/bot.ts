@@ -158,6 +158,18 @@ async function handleSetup(i: ChatInputCommandInteraction): Promise<void> {
   const adminRole = i.options.getRole('admin_role');
   if (reviewerRole) store.setSetting('reviewer_role',reviewerRole.id);
   if (adminRole) store.setSetting('admin_role',adminRole.id);
+  const { submissionChannel, helpChannel } = await ensureGuildSetup(guild);
+  await i.reply({ content: `Setup ready: ${submissionChannel} · help: ${helpChannel}. Existing channels and panel were reused where possible.`, flags: ephemeral });
+  await auditLog(guild,`Setup updated by <@${i.user.id}>.`);
+}
+async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: TextChannel; helpChannel: TextChannel }> {
+  await Promise.all([guild.channels.fetch(),guild.roles.fetch(),guild.members.fetchMe()]);
+  for (const [name,key] of [['ChainWreck Reviewer','reviewer_role'],['ChainWreck Admin','admin_role']] as const) {
+    if (!store.setting(key)) {
+      const role = guild.roles.cache.find(r => r.name.toLowerCase() === name.toLowerCase());
+      if (role) store.setSetting(key,role.id);
+    }
+  }
   const submissionChannel = await configuredChannel(guild,'submission_channel','chainwreck-submit',false);
   const helpChannel = await configuredChannel(guild,'help_channel','chainwreck-help',false);
   const approvals = await configuredChannel(guild,'approval_channel','chainwreck-approvals',true);
@@ -178,8 +190,7 @@ async function handleSetup(i: ChatInputCommandInteraction): Promise<void> {
     message = await submissionChannel.send({ content: '**ChainWreck Worlds**\nby TwerkTaco & Resolve\nSubmit free group posters below.', components: [panelRow()] });
     store.setSetting('panel_message',message.id);
   }
-  await i.reply({ content: `Setup ready: ${submissionChannel} · help: ${helpChannel}. Existing channels and panel were reused where possible.`, flags: ephemeral });
-  await auditLog(guild,`Setup updated by <@${i.user.id}>.`);
+  return { submissionChannel, helpChannel };
 }
 async function handlePoster(i: ChatInputCommandInteraction): Promise<void> {
   const sub = i.options.getSubcommand();
@@ -323,6 +334,11 @@ client.on('interactionCreate', async interaction => {
 client.once('ready', async () => {
   const guild = await client.guilds.fetch(guildId);
   await guild.commands.set([poster,group,setup,publish,help]);
+  if (process.env.CHAINWRECK_AUTO_SETUP === 'true') {
+    try { await ensureGuildSetup(guild); console.log('ChainWreck channels and panel ready.'); }
+    catch (error) { console.error('Automatic channel setup failed:',error); }
+  }
+  if (!publishConfig.dryRun && !store.activeRelease(0)) store.queuePublish(0);
   console.log('ChainWreck Worlds service ready.');
   setInterval(async () => {
     if (publishing) return;
