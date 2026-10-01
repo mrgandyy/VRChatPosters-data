@@ -175,11 +175,18 @@ async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: Text
   const approvals = await configuredChannel(guild,'approval_channel','chainwreck-approvals',true);
   const logs = await configuredChannel(guild,'log_channel','chainwreck-log',true);
   for (const channel of [approvals,logs]) {
-    await channel.permissionOverwrites.edit(guild.roles.everyone,{ ViewChannel: false });
-    await channel.permissionOverwrites.edit(guild.members.me!,{ ViewChannel: true, SendMessages: true });
+    if (!channel.permissionOverwrites.cache.get(guild.roles.everyone.id)?.deny.has(PermissionFlagsBits.ViewChannel))
+      await channel.permissionOverwrites.edit(guild.roles.everyone,{ ViewChannel: false });
+    const botOverwrite = channel.permissionOverwrites.cache.get(guild.members.me!.id);
+    if (!botOverwrite?.allow.has(PermissionFlagsBits.ViewChannel) ||
+        !botOverwrite.allow.has(PermissionFlagsBits.SendMessages))
+      await channel.permissionOverwrites.edit(guild.members.me!,{ ViewChannel: true, SendMessages: true });
     for (const key of ['reviewer_role','admin_role']) {
       const roleId = store.setting(key);
-      if (roleId) await channel.permissionOverwrites.edit(roleId,{ ViewChannel: true, SendMessages: true });
+      const overwrite = roleId ? channel.permissionOverwrites.cache.get(roleId) : undefined;
+      if (roleId && (!overwrite?.allow.has(PermissionFlagsBits.ViewChannel) ||
+          !overwrite.allow.has(PermissionFlagsBits.SendMessages)))
+        await channel.permissionOverwrites.edit(roleId,{ ViewChannel: true, SendMessages: true });
     }
   }
   const oldPanel = store.setting('panel_message');
