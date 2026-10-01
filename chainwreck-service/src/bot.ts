@@ -1,14 +1,14 @@
 import {
   ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client,
   GatewayIntentBits, MessageFlags, PermissionFlagsBits, SlashCommandBuilder,
-  type ButtonInteraction, type ChatInputCommandInteraction, type Guild,
+  type Attachment, type ButtonInteraction, type ChatInputCommandInteraction, type Guild,
   type TextChannel
 } from 'discord.js';
 import { join, resolve } from 'node:path';
 import { Store } from './db.js';
 import { MAX_SOURCE_BYTES, saveSource } from './atlas.js';
 import { activateRollback, processOneJob, type PublishConfig } from './publish.js';
-import type { Group } from './types.js';
+import { assertSlot, type Group } from './types.js';
 
 const token = process.env.DISCORD_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID;
@@ -32,6 +32,17 @@ const poster = new SlashCommandBuilder().setName('poster').setDescription('Chain
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addIntegerOption(o => o.setName('slot').setDescription('Poster slot').setRequired(true))
     .addAttachmentOption(o => o.setName('image').setDescription('Static PNG, JPEG, or WebP').setRequired(true)))
+  .addSubcommand(s => {
+    s.setName('batch').setDescription('Submit up to eight posters for review at once')
+      .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+      .addIntegerOption(o => o.setName('slot1').setDescription('First poster slot').setRequired(true))
+      .addAttachmentOption(o => o.setName('image1').setDescription('First poster image').setRequired(true));
+    for (let n = 2; n <= 8; n++) {
+      s.addIntegerOption(o => o.setName(`slot${n}`).setDescription(`Poster ${n} slot`));
+      s.addAttachmentOption(o => o.setName(`image${n}`).setDescription(`Poster ${n} image`));
+    }
+    return s;
+  })
   .addSubcommand(s => s.setName('list').setDescription('List group posters')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true)))
   .addSubcommand(s => s.setName('remove').setDescription('Restore default artwork in a slot')
@@ -213,29 +224,61 @@ async function handlePoster(i: ChatInputCommandInteraction): Promise<void> {
   if (!group.enabled) throw new Error('Group is suspended.');
   if (groupId !== 0 && group.agreementVersion !== 'verified18-v1')
     throw new Error('A representative must use /group accept for the verified-18+ hosting agreement before submissions.');
-  const slot = i.options.getInteger('slot',true);
   if (sub === 'remove') {
+    const slot = i.options.getInteger('slot',true);
     store.removeOverride(groupId,slot);
     await i.reply({ content: `Slot ${slot} will return to default artwork after publication.`, flags: ephemeral });
     return;
   }
-  await i.deferReply({ flags: ephemeral });
-  const attachment = i.options.getAttachment('image',true);
-  const bytes = await downloadAttachment(attachment.url,attachment.size);
-  const paths = await saveSource(bytes,dataDir);
-  const submission = store.submit(groupId,slot,i.user.id,paths.sourcePath,paths.previewPath);
-  const prior = submission.previousId ? store.submission(submission.previousId) : undefined;
+  const requested: { slot: number; attachment: Attachment }[] = [];
+  if (sub === 'submit') requested.push({ slot: i.options.getInteger('slot',true), attachment: i.options.getAttachment('image',true) });
+  else if (sub === 'batch') {
+    for (let n = 1; n <= 8; n++) {
+      const slot = i.options.getInteger(`slot${n}`);
+      const attachment = i.options.getAttachment(`image${n}`);
+      if ((slot === null) !== (attachment === null)) throw new Error(`Poster ${n} needs both a slot and an image.`);
+      if (slot !== null && attachment) requested.push({ slot, attachment });
+    }
+  } else throw new Error('Unknown poster action.');
+  const seen = new Set<number>();
+  for (const item of requested) {
+    assertSlot(group.tier,item.slot);
+    if (seen.has(item.slot)) throw new Error(`Slot ${item.slot} appears more than once.`);
+    if (item.attachment.size > MAX_SOURCE_BYTES) throw new Error(`Slot ${item.slot} attachment exceeds 12 MB.`);
+    seen.add(item.slot);
+  }
   const channelId = store.setting('approval_channel');
   const channel = channelId ? i.guild!.channels.cache.get(channelId) : undefined;
-  if (!channel || channel.type !== ChannelType.GuildText) throw new Error('Run /cw-setup to configure the approval channel. Submission is saved.');
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`cw:approve:${submission.id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`cw:reject:${submission.id}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
-  const files = [new AttachmentBuilder(paths.previewPath,{ name: 'proposed.png' })];
-  if (prior) files.push(new AttachmentBuilder(prior.previewPath,{ name: 'previous.png' }));
-  await (channel as TextChannel).send({ content: `**Poster #${submission.id}** · ${group.name} · slot ${slot}\nSubmitted by <@${i.user.id}>. ${prior ? `Previous approved poster: #${prior.id}.` : 'Previous: default artwork.'}`, files, components: [row] });
-  await i.editReply(`Poster #${submission.id} is saved and awaiting review.`);
-  await auditLog(i.guild,`Poster #${submission.id} submitted by <@${i.user.id}> for ${group.name} slot ${slot}.`);
+  if (!channel || channel.type !== ChannelType.GuildText) throw new Error('Run /cw-setup to configure the approval channel.');
+  await i.deferReply({ flags: ephemeral });
+  const prepared = [];
+  for (const item of requested) {
+    const bytes = await downloadAttachment(item.attachment.url,item.attachment.size);
+    prepared.push({ slot: item.slot, paths: await saveSource(bytes,dataDir) });
+  }
+  const submitted: number[] = [];
+  let pendingReviewNotice: number | undefined;
+  try {
+    for (const item of prepared) {
+      const submission = store.submit(groupId,item.slot,i.user.id,item.paths.sourcePath,item.paths.previewPath);
+      pendingReviewNotice = submission.id;
+      const prior = submission.previousId ? store.submission(submission.previousId) : undefined;
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`cw:approve:${submission.id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`cw:reject:${submission.id}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
+      const files = [new AttachmentBuilder(item.paths.previewPath,{ name: 'proposed.png' })];
+      if (prior) files.push(new AttachmentBuilder(prior.previewPath,{ name: 'previous.png' }));
+      await (channel as TextChannel).send({ content: `**Poster #${submission.id}** · ${group.name} · slot ${item.slot}\nSubmitted by <@${i.user.id}>. ${prior ? `Previous approved poster: #${prior.id}.` : 'Previous: default artwork.'}`, files, components: [row] });
+      submitted.push(submission.id);
+      pendingReviewNotice = undefined;
+      await auditLog(i.guild,`Poster #${submission.id} submitted by <@${i.user.id}> for ${group.name} slot ${item.slot}.`);
+    }
+  } catch (error) {
+    await i.editReply(`${submitted.length} poster(s) reached review.${pendingReviewNotice ? ` Poster #${pendingReviewNotice} was saved but its review message failed; ask an admin to resolve it.` : ''} Remaining posters were not submitted. Error: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  await i.editReply(submitted.length === 1 ? `Poster #${submitted[0]} is saved and awaiting review.` :
+    `${submitted.length} posters are saved and awaiting individual review: ${submitted.map(id => `#${id}`).join(', ')}.`);
 }
 async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   const sub = i.options.getSubcommand();
@@ -298,8 +341,8 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
   const [prefix, action, rawId] = i.customId.split(':');
   if (prefix !== 'cw') return;
   if (action === 'help' || action === 'submit') {
-    await i.reply({ content: action === 'submit' ? 'Use `/poster submit` with your group ID, slot, and static image attachment. An admin must approve your representative assignment first.' :
-      'ChainWreck Worlds: standard groups may use slots 1–8; admin assigned premium groups may use 1–16. Use `/group mine`, `/poster list`, and `/poster submit`.', flags: ephemeral });
+    await i.reply({ content: action === 'submit' ? 'Use `/poster submit` for one image or `/poster batch` for up to eight. Choose a group and slot for each image. An admin must approve your representative assignment first.' :
+      'ChainWreck Worlds: standard groups may use slots 1–8; admin assigned premium groups may use 1–16. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
     return;
   }
   if (action === 'groups' || action === 'mine') {
@@ -329,7 +372,7 @@ client.on('interactionCreate', async interaction => {
     else if (interaction.commandName === 'group') await handleGroup(interaction);
     else if (interaction.commandName === 'publish') await handlePublish(interaction);
     else if (interaction.commandName === 'cw-help') await interaction.reply({ content:
-      'Advertise your group for free. Join the ChainWreck Worlds Discord to submit your posters. Use `/group mine` and `/poster submit`. A representative assignment and verified-18+ hosting agreement are required.', flags: ephemeral });
+      'Advertise your group for free. Join the ChainWreck Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. A representative assignment and verified-18+ hosting agreement are required.', flags: ephemeral });
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {
@@ -339,6 +382,14 @@ client.on('interactionCreate', async interaction => {
   }
 });
 client.once('ready', async () => {
+  if (process.env.CHAINWRECK_SEED_SHXTTY === 'true') {
+    let pilot = store.groups().find(g => g.name.toUpperCase() === 'SHXTTY');
+    if (!pilot) {
+      pilot = store.registerGroup('SHXTTY','premium');
+      store.queuePublish(pilot.id);
+      console.log(`SHXTTY pilot registered as group ${pilot.id}.`);
+    } else console.log(`SHXTTY pilot already registered as group ${pilot.id}.`);
+  }
   const guild = await client.guilds.fetch(guildId);
   await guild.commands.set([poster,group,setup,publish,help]);
   if (process.env.CHAINWRECK_AUTO_SETUP === 'true') {
