@@ -1,0 +1,114 @@
+[
+  {
+    "slot": 1,
+    "name": "01_shxtty.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "a9deeb14621060f517d915c0b781149c233277c39b94c6ab72bd4edc9454367c"
+  },
+  {
+    "slot": 2,
+    "name": "02_wreckshop.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "a4ad2ab27a609a385d19310ee508e223d8f67a787a1f7501fc5f3e4b2330a71d"
+  },
+  {
+    "slot": 3,
+    "name": "03_venti.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "c4398df507f43fcbd087d44566827c73eb54abd029c91dddda15919941407d93"
+  },
+  {
+    "slot": 4,
+    "name": "04_fbt_social.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "83847d2d14b14d8689ba5f3631cff01e117b87dbaf52648d6f030c99c4385045"
+  },
+  {
+    "slot": 5,
+    "name": "05_premium_groups.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "a74bb7b77c14e14f78a05a5b297cd0938ff7bee136bf4deed02646b39a8567b5"
+  },
+  {
+    "slot": 6,
+    "name": "06_home_base.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "822fb985ef85267e199cb6238ba0cf9c8747122ce555ee5875c58726b7e14a26"
+  },
+  {
+    "slot": 7,
+    "name": "07_world_shop.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "ecbaa258e3339b334525a40753302b8f1232f2e764b24349731706a990fc0369"
+  },
+  {
+    "slot": 8,
+    "name": "08_free_ads.png",
+    "width": 512,
+    "height": 512,
+    "sha256": "debfcdf94212ad9e18af05879ea2fe42ec9b64c13fe471cdda4ae6522ee1c4a4"
+  },
+  {
+    "slot": 9,
+    "name": "09_dancers.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "04aa8afc6927708f68bf71f63e7acb71bdeefd6dba556165c8892f7b9f9d4c8e"
+  },
+  {
+    "slot": 10,
+    "name": "10_queue.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "0f15179d3e8bf064db51a02bb7529a189a71cd2a7007b36e745ce61a12180e76"
+  },
+  {
+    "slot": 11,
+    "name": "11_djs.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "c18d8af69e1766bc90e51b0370f1e2fef7836877f7341747e1c2f5164c3d9c90"
+  },
+  {
+    "slot": 12,
+    "name": "12_respect.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "d8c0c835e7e80a01f6b99b96ba5c27596c8a54c460d3a386c919495f75a64ae1"
+  },
+  {
+    "slot": 13,
+    "name": "13_photos.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "bff57b80be82621ac70d465c5429c45b82e4332a5265389c697a89213cd504b1"
+  },
+  {
+    "slot": 14,
+    "name": "14_feedback.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "ba9fd781ba0d96f9874538d3246445cdc8a69d25b1b2769cb1455a9cb6860330"
+  },
+  {
+    "slot": 15,
+    "name": "15_after_hours.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "4e3cd5667dfbd29267b327020b1435204bb8b1d61cd689c3de59f68aff0016b3"
+  },
+  {
+    "slot": 16,
+    "name": "16_creators.png",
+    "width": 1254,
+    "height": 1254,
+    "sha256": "946f942fbfc5062861102241ac768ff031a5086d170c4c3b319203e84af246e1"
+  }
+]
