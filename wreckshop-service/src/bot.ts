@@ -9,25 +9,26 @@ import { Store } from './db.js';
 import { MAX_SOURCE_BYTES, saveSource } from './atlas.js';
 import { activateRollback, processOneJob, type PublishConfig } from './publish.js';
 import { assertSlot, type Group } from './types.js';
+import { acceptsButtonPrefix, databasePath, legacyName, rebrand } from './branding.js';
 
 const token = process.env.DISCORD_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID;
 const appId = process.env.DISCORD_APPLICATION_ID;
 if (!token || !guildId || !appId) throw new Error('Set DISCORD_TOKEN, DISCORD_GUILD_ID, and DISCORD_APPLICATION_ID.');
-const dataDir = resolve(process.env.CHAINWRECK_DATA_DIR ?? './data');
-const store = new Store(join(dataDir,'chainwreck.sqlite'));
+const dataDir = resolve(process.env.WRECKSHOP_DATA_DIR ?? './data');
+const store = new Store(await databasePath(dataDir));
 const publishConfig: PublishConfig = {
   token: process.env.GITHUB_TOKEN, owner: process.env.GITHUB_OWNER,
   repository: process.env.GITHUB_REPOSITORY, branch: process.env.GITHUB_BRANCH ?? 'main',
   publicBase: process.env.GITHUB_PUBLIC_BASE,
-  defaultsDir: resolve(process.env.CHAINWRECK_DEFAULTS_DIR ?? './defaults'), dataDir,
-  dryRun: process.env.CHAINWRECK_DRY_RUN !== 'false'
+  defaultsDir: resolve(process.env.WRECKSHOP_DEFAULTS_DIR ?? './defaults'), dataDir,
+  dryRun: process.env.WRECKSHOP_DRY_RUN !== 'false'
 };
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 let publishing = false;
 const ephemeral = MessageFlags.Ephemeral;
 
-const poster = new SlashCommandBuilder().setName('poster').setDescription('ChainWreck posters')
+const poster = new SlashCommandBuilder().setName('poster').setDescription('Wreckshop posters')
   .addSubcommand(s => s.setName('submit').setDescription('Submit a poster for review')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addIntegerOption(o => o.setName('slot').setDescription('Poster slot').setRequired(true))
@@ -48,7 +49,7 @@ const poster = new SlashCommandBuilder().setName('poster').setDescription('Chain
   .addSubcommand(s => s.setName('remove').setDescription('Restore default artwork in a slot')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addIntegerOption(o => o.setName('slot').setDescription('Poster slot').setRequired(true)));
-const group = new SlashCommandBuilder().setName('group').setDescription('ChainWreck group administration')
+const group = new SlashCommandBuilder().setName('group').setDescription('Wreckshop group administration')
   .addSubcommand(s => s.setName('register').setDescription('Register a partner group')
     .addStringOption(o => o.setName('name').setDescription('Group name').setRequired(true))
     .addStringOption(o => o.setName('tier').setDescription('Tier').addChoices(
@@ -75,7 +76,7 @@ const group = new SlashCommandBuilder().setName('group').setDescription('ChainWr
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addBooleanOption(o => o.setName('agree').setDescription('I agree to run VRChat verified-18+ instances').setRequired(true)))
   .addSubcommand(s => s.setName('mine').setDescription('View groups you represent'));
-const setup = new SlashCommandBuilder().setName('cw-setup').setDescription('Set up ChainWreck channels and panel')
+const setup = new SlashCommandBuilder().setName('ws-setup').setDescription('Set up Wreckshop channels and panel')
   .addChannelOption(o => o.setName('submissions').setDescription('Existing public submission channel'))
   .addChannelOption(o => o.setName('help').setDescription('Existing public help channel'))
   .addChannelOption(o => o.setName('approvals').setDescription('Existing private approval channel'))
@@ -89,7 +90,7 @@ const publish = new SlashCommandBuilder().setName('publish').setDescription('Pub
   .addSubcommand(s => s.setName('rollback').setDescription('Restore an earlier published release')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addIntegerOption(o => o.setName('revision').setDescription('Published revision').setRequired(true)));
-const help = new SlashCommandBuilder().setName('cw-help').setDescription('ChainWreck help');
+const help = new SlashCommandBuilder().setName('ws-help').setDescription('Wreckshop help');
 
 function admin(interaction: ChatInputCommandInteraction | ButtonInteraction): boolean {
   return !!(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
@@ -123,10 +124,10 @@ async function downloadAttachment(url: string, advertisedSize: number): Promise<
 }
 function panelRow(): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('cw:submit').setLabel('Submit Poster').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('cw:mine').setLabel('My Posters').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('cw:groups').setLabel('Group Settings').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('cw:help').setLabel('Help').setStyle(ButtonStyle.Secondary));
+    new ButtonBuilder().setCustomId('ws:submit').setLabel('Submit Poster').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('ws:mine').setLabel('My Posters').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('ws:groups').setLabel('Group Settings').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('ws:help').setLabel('Help').setStyle(ButtonStyle.Secondary));
 }
 async function auditLog(guild: Guild | null, message: string): Promise<void> {
   const id = store.setting('log_channel');
@@ -138,10 +139,16 @@ async function configuredChannel(guild: Guild, setting: string, name: string, pr
   const saved = store.setting(setting);
   if (saved) {
     const old = guild.channels.cache.get(saved);
-    if (old?.type === ChannelType.GuildText) return old as TextChannel;
+    if (old?.type === ChannelType.GuildText) {
+      if (rebrand(old.name) !== old.name) await old.setName(rebrand(old.name),'Wreckshop Worlds rebrand');
+      return old as TextChannel;
+    }
   }
-  const existing = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === name);
-  if (existing) { store.setSetting(setting,existing.id); return existing as TextChannel; }
+  const existing = guild.channels.cache.find(c => c.type === ChannelType.GuildText && (c.name === name || c.name === legacyName(name)));
+  if (existing) {
+    if (existing.name !== name) await existing.setName(name,'Wreckshop Worlds rebrand');
+    store.setSetting(setting,existing.id); return existing as TextChannel;
+  }
   const channel = await guild.channels.create({ name, type: ChannelType.GuildText,
     permissionOverwrites: privateChannel ? [
       { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
@@ -175,16 +182,16 @@ async function handleSetup(i: ChatInputCommandInteraction): Promise<void> {
 }
 async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: TextChannel; helpChannel: TextChannel }> {
   await Promise.all([guild.channels.fetch(),guild.roles.fetch(),guild.members.fetchMe()]);
-  for (const [name,key] of [['ChainWreck Reviewer','reviewer_role'],['ChainWreck Admin','admin_role']] as const) {
+  for (const [name,key] of [['Wreckshop Reviewer','reviewer_role'],['Wreckshop Admin','admin_role']] as const) {
     if (!store.setting(key)) {
-      const role = guild.roles.cache.find(r => r.name.toLowerCase() === name.toLowerCase());
+      const role = guild.roles.cache.find(r => rebrand(r.name).toLowerCase() === name.toLowerCase());
       if (role) store.setSetting(key,role.id);
     }
   }
-  const submissionChannel = await configuredChannel(guild,'submission_channel','chainwreck-submit',false);
-  const helpChannel = await configuredChannel(guild,'help_channel','chainwreck-help',false);
-  const approvals = await configuredChannel(guild,'approval_channel','chainwreck-approvals',true);
-  const logs = await configuredChannel(guild,'log_channel','chainwreck-log',true);
+  const submissionChannel = await configuredChannel(guild,'submission_channel','wreckshop-submit',false);
+  const helpChannel = await configuredChannel(guild,'help_channel','wreckshop-help',false);
+  const approvals = await configuredChannel(guild,'approval_channel','wreckshop-approvals',true);
+  const logs = await configuredChannel(guild,'log_channel','wreckshop-log',true);
   for (const channel of [approvals,logs]) {
     if (!channel.permissionOverwrites.cache.get(guild.roles.everyone.id)?.deny.has(PermissionFlagsBits.ViewChannel))
       await channel.permissionOverwrites.edit(guild.roles.everyone,{ ViewChannel: false });
@@ -203,9 +210,15 @@ async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: Text
   const oldPanel = store.setting('panel_message');
   let message;
   if (oldPanel) message = await submissionChannel.messages.fetch(oldPanel).catch(() => undefined);
-  if (message) await message.edit({ content: '**ChainWreck Worlds**\nby TwerkTaco & Resolve\nSubmit free group posters below.', components: [panelRow()] });
+  const panel = {
+    content: '**Wreckshop Worlds**\nby TwerkTaco & Resolve\nSubmit free group posters below.',
+    components: [panelRow()],
+    embeds: [{ color: 0xff0099, thumbnail: { url: 'attachment://wreckshoplogo.png' } }],
+    files: [new AttachmentBuilder(resolve('branding/wreckshoplogo.png'))]
+  };
+  if (message) await message.edit({ ...panel, attachments: [] });
   else {
-    message = await submissionChannel.send({ content: '**ChainWreck Worlds**\nby TwerkTaco & Resolve\nSubmit free group posters below.', components: [panelRow()] });
+    message = await submissionChannel.send(panel);
     store.setSetting('panel_message',message.id);
   }
   return { submissionChannel, helpChannel };
@@ -249,7 +262,7 @@ async function handlePoster(i: ChatInputCommandInteraction): Promise<void> {
   }
   const channelId = store.setting('approval_channel');
   const channel = channelId ? i.guild!.channels.cache.get(channelId) : undefined;
-  if (!channel || channel.type !== ChannelType.GuildText) throw new Error('Run /cw-setup to configure the approval channel.');
+  if (!channel || channel.type !== ChannelType.GuildText) throw new Error('Run /ws-setup to configure the approval channel.');
   await i.deferReply({ flags: ephemeral });
   const prepared = [];
   for (const item of requested) {
@@ -264,8 +277,8 @@ async function handlePoster(i: ChatInputCommandInteraction): Promise<void> {
       pendingReviewNotice = submission.id;
       const prior = submission.previousId ? store.submission(submission.previousId) : undefined;
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(`cw:approve:${submission.id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`cw:reject:${submission.id}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
+        new ButtonBuilder().setCustomId(`ws:approve:${submission.id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`ws:reject:${submission.id}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
       const files = [new AttachmentBuilder(item.paths.previewPath,{ name: 'proposed.png' })];
       if (prior) files.push(new AttachmentBuilder(prior.previewPath,{ name: 'previous.png' }));
       await (channel as TextChannel).send({ content: `**Poster #${submission.id}** · ${group.name} · slot ${item.slot}\nSubmitted by <@${i.user.id}>. ${prior ? `Previous approved poster: #${prior.id}.` : 'Previous: default artwork.'}`, files, components: [row] });
@@ -295,7 +308,7 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
     await i.reply({ content: 'Acceptance recorded for verified-18+ instance hosting. This records an agreement, not automatic compliance verification.', flags: ephemeral });
     return;
   }
-  if (!admin(i)) throw new Error('ChainWreck admin access is required.');
+  if (!admin(i)) throw new Error('Wreckshop admin access is required.');
   if (sub === 'register') {
     const group = store.registerGroup(i.options.getString('name',true),
       i.options.getString('tier') === 'premium' ? 'premium' : 'standard');
@@ -317,7 +330,7 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   await auditLog(i.guild,`Group #${groupId} ${sub} updated by <@${i.user.id}>.`);
 }
 async function handlePublish(i: ChatInputCommandInteraction): Promise<void> {
-  if (!admin(i)) throw new Error('ChainWreck admin access is required.');
+  if (!admin(i)) throw new Error('Wreckshop admin access is required.');
   const sub = i.options.getSubcommand();
   if (sub === 'status') {
     const rows = store.db.prepare('SELECT id,group_id,status,attempts,error FROM jobs ORDER BY id DESC LIMIT 12').all() as
@@ -339,10 +352,10 @@ async function handlePublish(i: ChatInputCommandInteraction): Promise<void> {
 }
 async function handleButton(i: ButtonInteraction): Promise<void> {
   const [prefix, action, rawId] = i.customId.split(':');
-  if (prefix !== 'cw') return;
+  if (!acceptsButtonPrefix(prefix)) return;
   if (action === 'help' || action === 'submit') {
     await i.reply({ content: action === 'submit' ? 'Use `/poster submit` for one image or `/poster batch` for up to eight. Choose a group and slot for each image. An admin must approve your representative assignment first.' :
-      'ChainWreck Worlds: standard groups may use slots 1–8; admin assigned premium groups may use 1–16. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
+      'Wreckshop Worlds: standard groups may use slots 1–8; admin assigned premium groups may use 1–16. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
     return;
   }
   if (action === 'groups' || action === 'mine') {
@@ -367,12 +380,12 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isButton()) { await handleButton(interaction); return; }
     if (!interaction.isChatInputCommand()) return;
     if (interaction.guildId !== guildId) throw new Error('Use this in the configured server.');
-    if (interaction.commandName === 'cw-setup') await handleSetup(interaction);
+    if (interaction.commandName === 'ws-setup') await handleSetup(interaction);
     else if (interaction.commandName === 'poster') await handlePoster(interaction);
     else if (interaction.commandName === 'group') await handleGroup(interaction);
     else if (interaction.commandName === 'publish') await handlePublish(interaction);
-    else if (interaction.commandName === 'cw-help') await interaction.reply({ content:
-      'Advertise your group for free. Join the ChainWreck Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. A representative assignment and verified-18+ hosting agreement are required.', flags: ephemeral });
+    else if (interaction.commandName === 'ws-help') await interaction.reply({ content:
+      'Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. A representative assignment and verified-18+ hosting agreement are required.', flags: ephemeral });
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {
@@ -382,7 +395,7 @@ client.on('interactionCreate', async interaction => {
   }
 });
 client.once('ready', async () => {
-  if (process.env.CHAINWRECK_SEED_SHXTTY === 'true') {
+  if (process.env.WRECKSHOP_SEED_SHXTTY === 'true') {
     let pilot = store.groups().find(g => g.name.toUpperCase() === 'SHXTTY');
     if (!pilot) {
       pilot = store.registerGroup('SHXTTY','premium');
@@ -392,12 +405,12 @@ client.once('ready', async () => {
   }
   const guild = await client.guilds.fetch(guildId);
   await guild.commands.set([poster,group,setup,publish,help]);
-  if (process.env.CHAINWRECK_AUTO_SETUP === 'true') {
-    try { await ensureGuildSetup(guild); console.log('ChainWreck channels and panel ready.'); }
+  if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
+    try { await ensureGuildSetup(guild); console.log('Wreckshop channels and panel ready.'); }
     catch (error) { console.error('Automatic channel setup failed:',error); }
   }
   if (!publishConfig.dryRun && !store.activeRelease(0)) store.queuePublish(0);
-  console.log('ChainWreck Worlds service ready.');
+  console.log('Wreckshop Worlds service ready.');
   setInterval(async () => {
     if (publishing) return;
     publishing = true;

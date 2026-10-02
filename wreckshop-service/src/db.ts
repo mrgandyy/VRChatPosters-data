@@ -3,6 +3,7 @@ import { randomInt } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { assertSlot, type Group, type Submission, type Tier } from './types.js';
+import { LEGACY_BRAND } from './branding.js';
 
 export class Store {
   readonly db: Database.Database;
@@ -55,7 +56,9 @@ export class Store {
       this.db.exec('ALTER TABLE groups ADD COLUMN agreement_by TEXT');
     this.db.prepare("UPDATE jobs SET status='queued' WHERE status='publishing'").run();
     this.db.prepare(`INSERT OR IGNORE INTO groups(id,name,tier,code,enabled,atlas_slot)
-      VALUES(0,'ChainWreck Worlds','premium','00000000',1,0)`).run();
+      VALUES(0,'Wreckshop Worlds','premium','00000000',1,0)`).run();
+    this.db.prepare('UPDATE groups SET name=? WHERE id=0 AND lower(name)=lower(?)')
+      .run('Wreckshop Worlds',`${LEGACY_BRAND} Worlds`);
   }
 
   close(): void { this.db.close(); }

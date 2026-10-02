@@ -39,7 +39,7 @@ export function catalog(store: Store, replacement?: ReleaseRef): Buffer {
       atlasSha256: active?.sha256 ?? ''
     };
   });
-  return Buffer.from(JSON.stringify({ schema: 1, brand: 'ChainWreck Worlds',
+  return Buffer.from(JSON.stringify({ schema: 1, brand: 'Wreckshop Worlds',
     publisher: 'TwerkTaco & Resolve', generatedAt: new Date().toISOString(), groups }));
 }
 
@@ -105,17 +105,17 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   if (!config.token || !config.owner || !config.repository)
     throw new Error('GitHub credentials and repository settings are required.');
   if (!sameArtwork) {
-    await githubPut(config,relative,atlas.bytes,`Publish ChainWreck group ${groupId} atlas r${revision}`);
+    await githubPut(config,relative,atlas.bytes,`Publish Wreckshop group ${groupId} atlas r${revision}`);
     await verifyPublic(url,atlas.sha256);
   }
   const catalogPath = 'catalog.json';
   const oldCatalog = catalog(store);
   try {
-    await githubPut(config,catalogPath,nextCatalog,`Activate ChainWreck group ${groupId} r${revision}`);
+    await githubPut(config,catalogPath,nextCatalog,`Activate Wreckshop group ${groupId} r${revision}`);
     // JSON includes a generation timestamp, so hash verification also catches stale Pages responses.
     await verifyPublic(`${publicBase}/${catalogPath}`,sha(nextCatalog));
   } catch (error) {
-    await githubPut(config,catalogPath,oldCatalog,`Rollback ChainWreck catalog after failed activation`);
+    await githubPut(config,catalogPath,oldCatalog,`Rollback Wreckshop catalog after failed activation`);
     throw error;
   }
   if (!sameArtwork) store.recordRelease(groupId,revision,index,atlas.sha256,url);
@@ -153,10 +153,10 @@ export async function activateRollback(store: Store, groupId: number, revision: 
   const next = catalog(store,{groupId,revision,poolIndex:target.poolIndex,
     sha256:target.sha256,publicUrl:target.publicUrl});
   try {
-    await githubPut(config,'catalog.json',next,`Rollback ChainWreck group ${groupId} to r${revision}`);
+    await githubPut(config,'catalog.json',next,`Rollback Wreckshop group ${groupId} to r${revision}`);
     await verifyPublic(`${config.publicBase.replace(/\/$/,'')}/catalog.json`,sha(next));
   } catch (error) {
-    await githubPut(config,'catalog.json',old,'Restore ChainWreck catalog after failed rollback');
+    await githubPut(config,'catalog.json',old,'Restore Wreckshop catalog after failed rollback');
     throw error;
   }
   store.revert(groupId,revision);

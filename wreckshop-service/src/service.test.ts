@@ -9,7 +9,7 @@ import { buildAtlas, normalizePoster, uvRect } from './atlas.js';
 import { catalog, poolIndex, publishGroup } from './publish.js';
 
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(),'chainwreck-test-'));
+  const dir = mkdtempSync(join(tmpdir(),'wreckshop-test-'));
   const store = new Store(join(dir,'test.sqlite'));
   return { dir, store, finish: () => { store.close(); rmSync(dir,{recursive:true,force:true}); } };
 }
@@ -65,7 +65,7 @@ test('publishing queue survives restart and dry run emits catalog without markin
     try { assert.equal(reopened.nextJob()?.groupId,0); }
     finally { reopened.close(); }
     assert.equal(poolIndex(f.store.group(0)!,1),0);
-    const result = await publishGroup(f.store,0,{branch:'main',publicBase:'https://example.github.io/chainwreck',
+    const result = await publishGroup(f.store,0,{branch:'main',publicBase:'https://example.github.io/wreckshop',
       defaultsDir:defaults,dataDir:f.dir,dryRun:true});
     assert.match(result,/dry-run/);
     assert.equal(f.store.lastRelease(0),undefined);
