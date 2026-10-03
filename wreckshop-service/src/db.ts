@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { initializeBillboards } from './billboard.js';
 import { randomInt } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -51,6 +52,7 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
+    initializeBillboards(this);
     const columns = this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[];
     if (!columns.some(column => column.name === 'agreement_by'))
       this.db.exec('ALTER TABLE groups ADD COLUMN agreement_by TEXT');
@@ -102,8 +104,8 @@ export class Store {
       this.db.prepare('UPDATE groups SET tier=? WHERE id=?').run(tier, groupId);
       if (tier === 'standard') {
         this.db.prepare('DELETE FROM assignments WHERE group_id=? AND slot>8').run(groupId);
-        this.queuePublish(groupId);
       }
+      this.queuePublish(groupId);
     })();
   }
   setCode(groupId: number, code: string): void {

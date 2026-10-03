@@ -1,3 +1,4 @@
+import { liveBillboard, prepareBillboard, type BannerRelease } from './billboard.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -29,13 +30,14 @@ export function poolIndex(group: Group, revision: number): number {
     throw new Error('Authored atlas URL capacity exhausted; extend and reupload the world.');
   return group.atlasSlot * RELEASES_PER_GROUP + revision - 1;
 }
-export function catalog(store: Store, replacement?: ReleaseRef): Buffer {
+export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacement?: BannerRelease): Buffer {
   const groups = store.groups().map(group => {
     const active = replacement?.groupId === group.id ? replacement : store.activeRelease(group.id);
     return {
       id: group.id, name: group.name, tier: group.tier, code: group.code,
       enabled: !!group.enabled, vrchatGroupUrl: group.tier === 'premium' ? group.vrchatUrl : null,
       atlasPoolIndex: active?.poolIndex ?? -1, revision: active?.revision ?? 0,
+      billboardPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && bannerReplacement ? bannerReplacement : liveBillboard(store,group.id))?.poolIndex ?? -1) : -1,
       atlasSha256: active?.sha256 ?? ''
     };
   });
@@ -93,12 +95,14 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   const url = `${publicBase}/${relative}`;
   const candidate: ReleaseRef = { groupId, revision, poolIndex: index,
     sha256: atlas.sha256, publicUrl: sameArtwork ? previous!.publicUrl : url };
-  const nextCatalog = catalog(store,candidate);
+  const banner = await prepareBillboard(store,groupId);
+  const nextCatalog = catalog(store,candidate,banner?.release);
 
   if (config.dryRun) {
     const out = join(config.dataDir,'dry-run');
     await mkdir(out,{recursive:true});
     await writeFile(join(out,`group-${groupId}-atlas.png`),atlas.bytes);
+    if(banner)await writeFile(join(out,`group-${groupId}-billboard.png`),banner.bytes);
     await writeFile(join(out,'catalog.json'),nextCatalog);
     return `dry-run: ${out}`;
   }
@@ -107,6 +111,10 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   if (!sameArtwork) {
     await githubPut(config,relative,atlas.bytes,`Publish Wreckshop group ${groupId} atlas r${revision}`);
     await verifyPublic(url,atlas.sha256);
+  }
+  if(banner && liveBillboard(store,groupId)?.sha256 !== banner.release.sha256){
+    await githubPut(config,banner.release.path,banner.bytes,`Publish Wreckshop group ${groupId} billboard`);
+    await verifyPublic(`${publicBase}/${banner.release.path}`,banner.release.sha256);
   }
   const catalogPath = 'catalog.json';
   const oldCatalog = catalog(store);
@@ -118,6 +126,7 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
     await githubPut(config,catalogPath,oldCatalog,`Rollback Wreckshop catalog after failed activation`);
     throw error;
   }
+  if(banner)store.setSetting(`billboard-live-${groupId}`,JSON.stringify(banner.release));
   if (!sameArtwork) store.recordRelease(groupId,revision,index,atlas.sha256,url);
   store.db.prepare(`UPDATE submissions SET status='live',updated_at=CURRENT_TIMESTAMP
     WHERE id IN (SELECT submission_id FROM assignments WHERE group_id=?)`).run(groupId);

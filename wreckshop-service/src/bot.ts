@@ -4,6 +4,7 @@ import {
   type Attachment, type ButtonInteraction, type ChatInputCommandInteraction, type Guild,
   type TextChannel
 } from 'discord.js';
+import { submitBillboard, decideBillboard } from './billboard.js';
 import { join, resolve } from 'node:path';
 import { Store } from './db.js';
 import { MAX_SOURCE_BYTES, saveSource } from './atlas.js';
@@ -49,6 +50,27 @@ const poster = new SlashCommandBuilder().setName('poster').setDescription('Wreck
   .addSubcommand(s => s.setName('remove').setDescription('Restore default artwork in a slot')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addIntegerOption(o => o.setName('slot').setDescription('Poster slot').setRequired(true)));
+const billboard = new SlashCommandBuilder().setName('billboard').setDescription('Premium entrance billboard')
+  .addSubcommand(s=>s.setName('submit').setDescription('Upload a wide 4:1 billboard for review')
+    .addIntegerOption(o=>o.setName('group').setDescription('Premium group ID').setRequired(true))
+    .addAttachmentOption(o=>o.setName('image').setDescription('Static PNG, JPEG or WebP, ideally 2048 x 512').setRequired(true)));
+async function handleBillboard(i:ChatInputCommandInteraction):Promise<void>{
+  const id=i.options.getInteger('group',true);
+  const group=requiredGroup(id);
+  if(!canManage(i,id))throw new Error('You do not represent this group.');
+  if(!group.enabled || group.tier!=='premium' || id===0)throw new Error('Billboards require an enabled premium partner group.');
+  const channel=i.guild!.channels.cache.get(store.setting('approval_channel')??'');
+  if(!channel || channel.type!==ChannelType.GuildText)throw new Error('Approval channel is not configured.');
+  await i.deferReply({flags:ephemeral});
+  const attachment=i.options.getAttachment('image',true);
+  const paths=await saveSource(await downloadAttachment(attachment.url,attachment.size),dataDir);
+  const submission=submitBillboard(store,id,i.user.id,paths.sourcePath,paths.previewPath);
+  const row=new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`ws:bannerapprove:${submission}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`ws:bannerreject:${submission}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
+  await channel.send({content:`Billboard #${submission} for ${group.name}. Wide 4:1 entrance banner.`,files:[new AttachmentBuilder(paths.previewPath)],components:[row]});
+  await i.editReply(`Billboard #${submission} saved for review. Approved artwork appears when your group code is selected in the world.`);
+}
 const group = new SlashCommandBuilder().setName('group').setDescription('Wreckshop group administration')
   .addSubcommand(s => s.setName('register').setDescription('Register a partner group')
     .addStringOption(o => o.setName('name').setDescription('Group name').setRequired(true))
@@ -72,9 +94,9 @@ const group = new SlashCommandBuilder().setName('group').setDescription('Wrecksh
   .addSubcommand(s => s.setName('page').setDescription('Set VRChat group page')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addStringOption(o => o.setName('url').setDescription('VRChat group URL').setRequired(true)))
-  .addSubcommand(s => s.setName('accept').setDescription('Accept verified-18+ partner hosting requirement')
+  .addSubcommand(s => s.setName('accept').setDescription('Acknowledge VRChat rules and hosting responsibilities')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
-    .addBooleanOption(o => o.setName('agree').setDescription('I agree to run VRChat verified-18+ instances').setRequired(true)))
+    .addBooleanOption(o => o.setName('agree').setDescription('I agree to follow VRChat rules').setRequired(true)))
   .addSubcommand(s => s.setName('mine').setDescription('View groups you represent'));
 const setup = new SlashCommandBuilder().setName('ws-setup').setDescription('Set up Wreckshop channels and panel')
   .addChannelOption(o => o.setName('submissions').setDescription('Existing public submission channel'))
@@ -235,8 +257,6 @@ async function handlePoster(i: ChatInputCommandInteraction): Promise<void> {
   }
   if (!canManage(i,groupId)) throw new Error('You do not represent this group.');
   if (!group.enabled) throw new Error('Group is suspended.');
-  if (groupId !== 0 && group.agreementVersion !== 'verified18-v1')
-    throw new Error('A representative must use /group accept for the verified-18+ hosting agreement before submissions.');
   if (sub === 'remove') {
     const slot = i.options.getInteger('slot',true);
     store.removeOverride(groupId,slot);
@@ -304,20 +324,24 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
     const groupId = i.options.getInteger('group',true);
     if (!store.canRepresent(groupId,i.user.id)) throw new Error('Only an assigned representative can accept for this group.');
     if (!i.options.getBoolean('agree',true)) throw new Error('Acceptance was not recorded.');
-    store.acceptAgreement(groupId,'verified18-v1',i.user.id);
-    await i.reply({ content: 'Acceptance recorded for verified-18+ instance hosting. This records an agreement, not automatic compliance verification.', flags: ephemeral });
+    store.acceptAgreement(groupId,'vrchat-rules-v1',i.user.id);
+    await i.reply({ content: 'Acknowledgment recorded. Follow VRChat rules and use VRChat moderation and reporting tools for issues. This is not age verification.', flags: ephemeral });
     return;
   }
-  if (!admin(i)) throw new Error('Wreckshop admin access is required.');
   if (sub === 'register') {
+    if (i.options.getString('tier') === 'premium' && !admin(i)) throw new Error('Premium is assigned by Wreckshop admins. Register a standard group first.');
     const group = store.registerGroup(i.options.getString('name',true),
       i.options.getString('tier') === 'premium' ? 'premium' : 'standard');
-    await i.reply({ content: `Registered #${group.id} ${group.name}. Shareable code: ${group.code}. Assign a representative; they must use /group accept before submissions.`, flags: ephemeral });
+    store.addRepresentative(group.id,i.user.id);
+    store.queuePublish(group.id);
+    await i.reply({ content: `Registered #${group.id} ${group.name}. Shareable code: ${group.code}. You are its representative. Use /poster submit or /poster batch to upload artwork.`, flags: ephemeral });
     await auditLog(i.guild,`Group #${group.id} ${group.name} registered by <@${i.user.id}> as ${group.tier}.`);
     return;
   }
   const groupId = i.options.getInteger('group',true);
   requiredGroup(groupId);
+  if (sub === 'page' || sub === 'code') { if (!canManage(i,groupId)) throw new Error('You do not represent this group.'); }
+  else if (!admin(i)) throw new Error('Wreckshop admin access is required.');
   if (sub === 'representative') {
     const user = i.options.getUser('user',true);
     if (i.options.getString('action',true) === 'add') store.addRepresentative(groupId,user.id);
@@ -354,7 +378,7 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
   const [prefix, action, rawId] = i.customId.split(':');
   if (!acceptsButtonPrefix(prefix)) return;
   if (action === 'help' || action === 'submit') {
-    await i.reply({ content: action === 'submit' ? 'Use `/poster submit` for one image or `/poster batch` for up to eight. Choose a group and slot for each image. An admin must approve your representative assignment first.' :
+    await i.reply({ content: action === 'submit' ? 'Use `/poster submit` for one image or `/poster batch` for up to eight. Choose a group and slot for each image. Register your group with `/group register`; you become its representative.' :
       'Wreckshop Worlds: standard groups may use slots 1–8; admin assigned premium groups may use 1–16. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
     return;
   }
@@ -364,6 +388,11 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
       store.submissions(g.id).filter(s => s.submitterId === i.user.id).slice(0,8).map(s => `${g.name} #${s.id} slot ${s.slot}: ${s.status}`));
     await i.reply({ content: lines.length ? lines.join('\n') : 'Nothing to show yet.', flags: ephemeral });
     return;
+  }
+  if (action === 'bannerapprove' || action === 'bannerreject') {
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    decideBillboard(store,Number(rawId),i.user.id,action === 'bannerapprove');
+    await i.update({ content: `${i.message.content}\n${action === 'bannerapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] }); return;
   }
   if (action === 'approve' || action === 'reject') {
     if (!reviewer(i)) throw new Error('Reviewer access is required.');
@@ -381,11 +410,12 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.guildId !== guildId) throw new Error('Use this in the configured server.');
     if (interaction.commandName === 'ws-setup') await handleSetup(interaction);
+    else if (interaction.commandName === 'billboard') await handleBillboard(interaction);
     else if (interaction.commandName === 'poster') await handlePoster(interaction);
     else if (interaction.commandName === 'group') await handleGroup(interaction);
     else if (interaction.commandName === 'publish') await handlePublish(interaction);
     else if (interaction.commandName === 'ws-help') await interaction.reply({ content:
-      'Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. A representative assignment and verified-18+ hosting agreement are required.', flags: ephemeral });
+      'Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit`. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {
@@ -404,7 +434,7 @@ client.once('ready', async () => {
     } else console.log(`SHXTTY pilot already registered as group ${pilot.id}.`);
   }
   const guild = await client.guilds.fetch(guildId);
-  await guild.commands.set([poster,group,setup,publish,help]);
+  await guild.commands.set([poster,group,setup,publish,help,billboard]);
   if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
     try { await ensureGuildSetup(guild); console.log('Wreckshop channels and panel ready.'); }
     catch (error) { console.error('Automatic channel setup failed:',error); }
