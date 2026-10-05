@@ -1,4 +1,5 @@
 import { initializeBackdrops } from './backdrop.js';
+import { normalizeGroupLink } from './group-link.js';
 import Database from 'better-sqlite3';
 import { initializeBillboards } from './billboard.js';
 import { randomInt } from 'node:crypto';
@@ -88,7 +89,8 @@ export class Store {
       agreement_version AS agreementVersion,agreement_at AS agreementAt,
       atlas_slot AS atlasSlot,revision FROM groups ORDER BY id`).all() as Group[];
   }
-  registerGroup(name: string, tier: Tier = 'standard'): Group {
+  registerGroup(name: string, tier: Tier = 'standard', vrchatGroup?: string): Group {
+    const vrchatUrl = vrchatGroup === undefined ? null : normalizeGroupLink(vrchatGroup);
     if (!name.trim() || name.length > 80) throw new Error('Group name must be 1–80 characters.');
     const count = this.db.prepare('SELECT COUNT(*) AS n FROM groups').get() as { n: number };
     if (count.n >= 32) throw new Error('Authored atlas URL capacity is 32 groups.');
@@ -96,8 +98,8 @@ export class Store {
     do { code = randomInt(0, 100_000_000).toString().padStart(8, '0'); }
     while (this.groupByCode(code));
     const slot = count.n;
-    const id = Number(this.db.prepare(`INSERT INTO groups(name,tier,code,atlas_slot)
-      VALUES(?,?,?,?)`).run(name.trim(), tier, code, slot).lastInsertRowid);
+    const id = Number(this.db.prepare(`INSERT INTO groups(name,tier,code,atlas_slot,vrchat_url)
+      VALUES(?,?,?,?,?)`).run(name.trim(), tier, code, slot,vrchatUrl).lastInsertRowid);
     return this.group(id)!;
   }
   setTier(groupId: number, tier: Tier): void {
@@ -122,8 +124,7 @@ export class Store {
     this.queuePublish(groupId);
   }
   setUrl(groupId: number, url: string | null): void {
-    if (url && !/^https:\/\/vrchat\.com\/home\/group\/[A-Za-z0-9_-]+$/.test(url))
-      throw new Error('Use a VRChat group page URL.');
+    if (url !== null) url = normalizeGroupLink(url);
     this.db.prepare('UPDATE groups SET vrchat_url=? WHERE id=?').run(url, groupId);
     this.queuePublish(groupId);
   }

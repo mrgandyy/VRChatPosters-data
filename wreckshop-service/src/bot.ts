@@ -1,5 +1,6 @@
 import { submitBackdrop, decideBackdrop } from './backdrop.js';
 import { refreshRepresentativeNames } from './recognition.js';
+import { groupLinkPrompt } from './group-link.js';
 import {
   ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client,
   GatewayIntentBits, MessageFlags, PermissionFlagsBits, SlashCommandBuilder,
@@ -97,6 +98,7 @@ async function handleBackdrop(i:ChatInputCommandInteraction):Promise<void>{
 const group = new SlashCommandBuilder().setName('group').setDescription('Wreckshop group administration')
   .addSubcommand(s => s.setName('register').setDescription('Register a partner group')
     .addStringOption(o => o.setName('name').setDescription('Group name').setRequired(true))
+    .addStringOption(o => o.setName('vrchat_group').setDescription('Required for Premium: your VRChat grp_ UUID or official group page URL'))
     .addStringOption(o => o.setName('tier').setDescription('Tier').addChoices(
       { name: 'Standard', value: 'standard' },{ name: 'Premium', value: 'premium' })))
   .addSubcommand(s => s.setName('representative').setDescription('Add or remove a representative')
@@ -116,7 +118,10 @@ const group = new SlashCommandBuilder().setName('group').setDescription('Wrecksh
     .addBooleanOption(o => o.setName('enabled').setDescription('Enabled').setRequired(true)))
   .addSubcommand(s => s.setName('page').setDescription('Set VRChat group page')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
-    .addStringOption(o => o.setName('url').setDescription('VRChat group URL').setRequired(true)))
+    .addStringOption(o => o.setName('url').setDescription('VRChat grp_ UUID or group page URL').setRequired(true)))
+  .addSubcommand(s => s.setName('link').setDescription('Configure your in-world Join group button')
+    .addIntegerOption(o => o.setName('group').setDescription('Your Wreckshop group number from /group mine').setRequired(true))
+    .addStringOption(o => o.setName('vrchat_group').setDescription('Your VRChat grp_ UUID or official group page URL').setRequired(true)))
   .addSubcommand(s => s.setName('accept').setDescription('Acknowledge VRChat rules and hosting responsibilities')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addBooleanOption(o => o.setName('agree').setDescription('I agree to follow VRChat rules').setRequired(true)))
@@ -350,7 +355,7 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   const sub = i.options.getSubcommand();
   if (sub === 'mine') {
     const groups = store.representedGroups(i.user.id);
-    await i.reply({ content: groups.length ? groups.map(g => `#${g.id} ${g.name} · ${g.tier} · code ${g.code}`).join('\n') : 'No assigned groups.', flags: ephemeral });
+    await i.reply({ content: groups.length ? groups.map(g => `#${g.id} ${g.name} · ${g.tier} · code ${g.code}\n${groupLinkPrompt(g)}`).join('\n\n') : 'No assigned groups. Use /group register and provide your VRChat group ID.', flags: ephemeral });
     return;
   }
   if (sub === 'accept') {
@@ -363,18 +368,21 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   }
   if (sub === 'register') {
     if (i.options.getString('tier') === 'premium' && !admin(i)) throw new Error('Premium is assigned by Wreckshop admins. Register a standard group first.');
+    const vrchatGroup = i.options.getString('vrchat_group') ?? undefined;
+    if (i.options.getString('tier') === 'premium' && !vrchatGroup) throw new Error('Premium groups need their VRChat group ID. Provide vrchat_group:grp_<your-group-UUID>, found in your VRChat group page URL.');
     const group = store.registerGroup(i.options.getString('name',true),
-      i.options.getString('tier') === 'premium' ? 'premium' : 'standard');
+      i.options.getString('tier') === 'premium' ? 'premium' : 'standard', vrchatGroup);
     store.addRepresentative(group.id,i.user.id);
     store.setSetting(`representative-name-${i.user.id}`,'@'+i.user.username);
     store.queuePublish(group.id);
-    await i.reply({ content: `Registered #${group.id} ${group.name}. Shareable code: ${group.code}. You are its representative. Use /poster submit or /poster batch to upload artwork.`, flags: ephemeral });
+    await i.reply({ content: `Registered #${group.id} ${group.name}. Shareable code: ${group.code}. You are its representative. ${groupLinkPrompt(group)} Use /poster submit or /poster batch to upload artwork.`, flags: ephemeral });
     await auditLog(i.guild,`Group #${group.id} ${group.name} registered by <@${i.user.id}> as ${group.tier}.`);
     return;
   }
   const groupId = i.options.getInteger('group',true);
   requiredGroup(groupId);
-  if (sub === 'page' || sub === 'code' || sub === 'recognition') { if (!canManage(i,groupId)) throw new Error('You do not represent this group.'); }
+  if ((sub === 'page' || sub === 'link') && requiredGroup(groupId).tier !== 'premium') throw new Error('Join group is available for Premium groups only.');
+  if (sub === 'page' || sub === 'link' || sub === 'code' || sub === 'recognition') { if (!canManage(i,groupId)) throw new Error('You do not represent this group.'); }
   else if (!admin(i)) throw new Error('Wreckshop admin access is required.');
   if (sub === 'representative') {
     const user = i.options.getUser('user',true);
@@ -384,11 +392,12 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   else if (sub === 'code') store.setCode(groupId,i.options.getString('value',true));
   else if (sub === 'suspend') store.setEnabled(groupId,i.options.getBoolean('enabled',true));
   else if (sub === 'page') store.setUrl(groupId,i.options.getString('url',true));
+  else if (sub === 'link') store.setUrl(groupId,i.options.getString('vrchat_group',true));
   if(sub === 'representative' || sub === 'recognition') {
     await i.deferReply({flags:ephemeral});
     await refreshRepresentativeNames(store,i.guild!);store.queuePublish(groupId);
     await i.editReply(`Updated ${requiredGroup(groupId).name}; entrance recognition refresh queued.`);
-  } else await i.reply({ content: `Updated ${requiredGroup(groupId).name}.`, flags: ephemeral });
+  } else await i.reply({ content: `Updated ${requiredGroup(groupId).name}.${sub === 'page' || sub === 'link' || sub === 'tier' ? ` ${groupLinkPrompt(requiredGroup(groupId))} Publication queued.` : ''}`, flags: ephemeral });
   await auditLog(i.guild,`Group #${groupId} ${sub} updated by <@${i.user.id}>.`);
 }
 async function handlePublish(i: ChatInputCommandInteraction): Promise<void> {
@@ -422,7 +431,7 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
   }
   if (action === 'groups' || action === 'mine') {
     const groups = store.representedGroups(i.user.id);
-    const lines = groups.flatMap(g => action === 'groups' ? [`#${g.id} ${g.name} · ${g.tier} · code ${g.code}`] :
+    const lines = groups.flatMap(g => action === 'groups' ? [`#${g.id} ${g.name} · ${g.tier} · code ${g.code}\n${groupLinkPrompt(g)}`] :
       store.submissions(g.id).filter(s => s.submitterId === i.user.id).slice(0,8).map(s => `${g.name} #${s.id} slot ${s.slot}: ${s.status}`));
     await i.reply({ content: lines.length ? lines.join('\n') : 'Nothing to show yet.', flags: ephemeral });
     return;

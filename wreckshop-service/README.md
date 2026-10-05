@@ -49,3 +49,11 @@ Approved artwork is published under the independent `backdrops/` URL pool and se
 
 Build with `npm run build` and run `npm test`. Restart the deployed bot with its existing configuration to register the new slash command. Updating this repository alone does not restart the deployed service or publish a new VRChat world.
 
+
+## Premium Join group destination
+
+Join group is Premium-only. `/group register name:<name> tier:premium vrchat_group:<grp_UUID-or-official-URL>` requires the partner's VRChat group ID; Standard registration does not require it. IDs are accepted in `grp_` UUID form or as an official `https://vrchat.com/home/group/` URL and stored canonically. Format validation does not verify ownership of the external VRChat group.
+
+Existing Premium representatives use `/group link group:<Wreckshop-number> vrchat_group:<grp_UUID-or-official-URL>`. The legacy `/group page group:<number> url:<ID-or-URL>` remains available for Premium groups. These commands use the existing representative/admin permission check and queue publication. `/group mine` and the panel's groups action show the configured destination, or ask Premium representatives to supply their missing ID. A Premium tier change also displays this setup prompt when needed.
+
+The world opens the active Premium group's VRChat page. The button remains hidden without a configured link and for Standard groups. No example ID is assigned automatically, and opening the page does not automatically join a player to a group.
