@@ -366,7 +366,7 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
     const group = store.registerGroup(i.options.getString('name',true),
       i.options.getString('tier') === 'premium' ? 'premium' : 'standard');
     store.addRepresentative(group.id,i.user.id);
-    store.setSetting(`representative-name-${i.user.id}`,i.user.displayName.replace(/[<>\r\n\t]/g,'').trim().slice(0,64));
+    store.setSetting(`representative-name-${i.user.id}`,'@'+i.user.username);
     store.queuePublish(group.id);
     await i.reply({ content: `Registered #${group.id} ${group.name}. Shareable code: ${group.code}. You are its representative. Use /poster submit or /poster batch to upload artwork.`, flags: ephemeral });
     await auditLog(i.guild,`Group #${group.id} ${group.name} registered by <@${i.user.id}> as ${group.tier}.`);

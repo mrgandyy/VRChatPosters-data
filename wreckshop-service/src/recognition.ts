@@ -13,7 +13,7 @@ export async function refreshRepresentativeNames(store: Store, guild: Guild): Pr
   for (const row of rows) {
     try {
       const member = await guild.members.fetch(row.user_id);
-      const name = member.displayName.replace(/[<>\r\n\t]/g,'').trim().slice(0,64);
+      const name = '@' + member.user.username;
       if (name !== store.setting(`representative-name-${row.user_id}`)) {
         store.setSetting(`representative-name-${row.user_id}`,name); changed = true;
       }
