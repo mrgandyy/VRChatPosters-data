@@ -251,6 +251,14 @@ async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: Text
         await channel.permissionOverwrites.edit(roleId,{ ViewChannel: true, SendMessages: true });
     }
   }
+  // The bot needs explicit access even if the server hides these channels from @everyone.
+  for (const channel of [submissionChannel,helpChannel,approvals,logs]) {
+    const needed = [PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.EmbedLinks,PermissionFlagsBits.AttachFiles];
+    if (!needed.every(p=>channel.permissionsFor(guild.members.me!)?.has(p)))
+      await channel.permissionOverwrites.edit(guild.members.me!,{ ViewChannel:true,SendMessages:true,
+        ReadMessageHistory:true,EmbedLinks:true,AttachFiles:true });
+  }
   const oldPanel = store.setting('panel_message');
   let message;
   if (oldPanel) message = await submissionChannel.messages.fetch(oldPanel).catch(() => undefined);
@@ -468,6 +476,7 @@ client.once('ready', async () => {
     catch (error) { console.error('Automatic channel setup failed:',error); }
   }
   if (!publishConfig.dryRun && !store.activeRelease(0)) store.queuePublish(0);
+  store.db.prepare("UPDATE jobs SET status='queued' WHERE status='publishing'").run();
   // One-time recovery of the most recent job affected by the Pages outage.
   if (!publishConfig.dryRun && !store.setting('pages-recovery-20261005')) {
     const failed = store.db.prepare(`SELECT group_id AS groupId FROM jobs j
