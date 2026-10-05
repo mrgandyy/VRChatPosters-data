@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { buildAtlas } from './atlas.js';
 import type { Store } from './db.js';
 import type { Group } from './types.js';
+import { representativeNames } from './recognition.js';
 
 export const RELEASES_PER_GROUP = 8;
 export const GROUP_CAPACITY = 32;
@@ -36,6 +37,7 @@ export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacemen
     const active = replacement?.groupId === group.id ? replacement : store.activeRelease(group.id);
     return {
       id: group.id, name: group.name, tier: group.tier, code: group.code,
+      representatives: group.id > 0 && group.enabled ? representativeNames(store,group.id) : [],
       enabled: !!group.enabled, vrchatGroupUrl: group.tier === 'premium' ? group.vrchatUrl : null,
       atlasPoolIndex: active?.poolIndex ?? -1, revision: active?.revision ?? 0,
       billboardPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && bannerReplacement ? bannerReplacement : liveBillboard(store,group.id))?.poolIndex ?? -1) : -1,

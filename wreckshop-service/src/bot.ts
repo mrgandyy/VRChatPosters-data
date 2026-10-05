@@ -1,4 +1,5 @@
 import { submitBackdrop, decideBackdrop } from './backdrop.js';
+import { refreshRepresentativeNames } from './recognition.js';
 import {
   ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client,
   GatewayIntentBits, MessageFlags, PermissionFlagsBits, SlashCommandBuilder,
@@ -119,6 +120,8 @@ const group = new SlashCommandBuilder().setName('group').setDescription('Wrecksh
   .addSubcommand(s => s.setName('accept').setDescription('Acknowledge VRChat rules and hosting responsibilities')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addBooleanOption(o => o.setName('agree').setDescription('I agree to follow VRChat rules').setRequired(true)))
+  .addSubcommand(s => s.setName('recognition').setDescription('Refresh representative names on the entrance board')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true)))
   .addSubcommand(s => s.setName('mine').setDescription('View groups you represent'));
 const setup = new SlashCommandBuilder().setName('ws-setup').setDescription('Set up Wreckshop channels and panel')
   .addChannelOption(o => o.setName('submissions').setDescription('Existing public submission channel'))
@@ -363,6 +366,7 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
     const group = store.registerGroup(i.options.getString('name',true),
       i.options.getString('tier') === 'premium' ? 'premium' : 'standard');
     store.addRepresentative(group.id,i.user.id);
+    store.setSetting(`representative-name-${i.user.id}`,i.user.displayName.replace(/[<>\r\n\t]/g,'').trim().slice(0,64));
     store.queuePublish(group.id);
     await i.reply({ content: `Registered #${group.id} ${group.name}. Shareable code: ${group.code}. You are its representative. Use /poster submit or /poster batch to upload artwork.`, flags: ephemeral });
     await auditLog(i.guild,`Group #${group.id} ${group.name} registered by <@${i.user.id}> as ${group.tier}.`);
@@ -370,7 +374,7 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   }
   const groupId = i.options.getInteger('group',true);
   requiredGroup(groupId);
-  if (sub === 'page' || sub === 'code') { if (!canManage(i,groupId)) throw new Error('You do not represent this group.'); }
+  if (sub === 'page' || sub === 'code' || sub === 'recognition') { if (!canManage(i,groupId)) throw new Error('You do not represent this group.'); }
   else if (!admin(i)) throw new Error('Wreckshop admin access is required.');
   if (sub === 'representative') {
     const user = i.options.getUser('user',true);
@@ -380,7 +384,11 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   else if (sub === 'code') store.setCode(groupId,i.options.getString('value',true));
   else if (sub === 'suspend') store.setEnabled(groupId,i.options.getBoolean('enabled',true));
   else if (sub === 'page') store.setUrl(groupId,i.options.getString('url',true));
-  await i.reply({ content: `Updated ${requiredGroup(groupId).name}.`, flags: ephemeral });
+  if(sub === 'representative' || sub === 'recognition') {
+    await i.deferReply({flags:ephemeral});
+    await refreshRepresentativeNames(store,i.guild!);store.queuePublish(groupId);
+    await i.editReply(`Updated ${requiredGroup(groupId).name}; entrance recognition refresh queued.`);
+  } else await i.reply({ content: `Updated ${requiredGroup(groupId).name}.`, flags: ephemeral });
   await auditLog(i.guild,`Group #${groupId} ${sub} updated by <@${i.user.id}>.`);
 }
 async function handlePublish(i: ChatInputCommandInteraction): Promise<void> {
@@ -470,6 +478,7 @@ client.once('ready', async () => {
     } else console.log(`SHXTTY pilot already registered as group ${pilot.id}.`);
   }
   const guild = await client.guilds.fetch(guildId);
+  if(await refreshRepresentativeNames(store,guild))store.queuePublish(0);
   await guild.commands.set([poster,group,setup,publish,help,billboard,backdrop]);
   if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
     try { await ensureGuildSetup(guild); console.log('Wreckshop channels and panel ready.'); }
