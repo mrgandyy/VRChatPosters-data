@@ -1,5 +1,4 @@
 import { submitBackdrop, decideBackdrop } from './backdrop.js';
-import { refreshRepresentativeNames } from './recognition.js';
 import { groupLinkPrompt } from './group-link.js';
 import {
   ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client,
@@ -395,7 +394,7 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   else if (sub === 'link') store.setUrl(groupId,i.options.getString('vrchat_group',true));
   if(sub === 'representative' || sub === 'recognition') {
     await i.deferReply({flags:ephemeral});
-    await refreshRepresentativeNames(store,i.guild!);store.queuePublish(groupId);
+    store.queuePublish(groupId);
     await i.editReply(`Updated ${requiredGroup(groupId).name}; entrance recognition refresh queued.`);
   } else await i.reply({ content: `Updated ${requiredGroup(groupId).name}.${sub === 'page' || sub === 'link' || sub === 'tier' ? ` ${groupLinkPrompt(requiredGroup(groupId))} Publication queued.` : ''}`, flags: ephemeral });
   await auditLog(i.guild,`Group #${groupId} ${sub} updated by <@${i.user.id}>.`);
@@ -487,7 +486,7 @@ client.once('ready', async () => {
     } else console.log(`SHXTTY pilot already registered as group ${pilot.id}.`);
   }
   const guild = await client.guilds.fetch(guildId);
-  if(await refreshRepresentativeNames(store,guild))store.queuePublish(0);
+  if(store.setting('recognition-privacy-v2')!=='applied'){store.queuePublish(0);store.setSetting('recognition-privacy-v2','applied');}
   await guild.commands.set([poster,group,setup,publish,help,billboard,backdrop]);
   if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
     try { await ensureGuildSetup(guild); console.log('Wreckshop channels and panel ready.'); }
