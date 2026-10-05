@@ -41,3 +41,11 @@ VRChat Udon image and string downloads are rate limited and subject to client ca
 ## Wreckshop Worlds rename
 
 The first startup migrates the legacy SQLite file with SQLite's online backup API, including committed WAL records, into `wreckshop.sqlite`. It retains the original file for recovery and never overwrites an existing new database. Only the built-in default group's old name changes; partner IDs, codes, representatives, approvals, releases, channel IDs, and role IDs are preserved. Old pending review buttons remain usable. Compatibility strings are isolated in `src/branding.ts`; historical backups retain their original names. The new public commands are `/ws-setup` and `/ws-help`.
+# Premium FBT Social photo backdrop
+
+`/backdrop submit group:<group-id> image:<attachment>` submits a photo-wall background independently of the entrance billboard. The caller must represent the enabled premium group (or have the existing administrator permission). Existing reviewers approve or reject the submission in the configured approval channel. Accepted images are fitted into a 2048 × 1536 PNG; the existing upload validation applies.
+
+Approved artwork is published under the independent `backdrops/` URL pool and selected through `backdropPoolIndex` in the catalog. The Unity photo wall retains its default FBT artwork while loading, after a failed image request, and whenever there is no eligible premium group. Each group has eight immutable backdrop revisions, matching the preauthored Unity URL pool. Repeated publication of identical artwork reuses the same revision.
+
+Build with `npm run build` and run `npm test`. Restart the deployed bot with its existing configuration to register the new slash command. Updating this repository alone does not restart the deployed service or publish a new VRChat world.
+

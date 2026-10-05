@@ -1,3 +1,4 @@
+import { liveBackdrop, prepareBackdrop, type BackdropRelease } from './backdrop.js';
 import { liveBillboard, prepareBillboard, type BannerRelease } from './billboard.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -30,7 +31,7 @@ export function poolIndex(group: Group, revision: number): number {
     throw new Error('Authored atlas URL capacity exhausted; extend and reupload the world.');
   return group.atlasSlot * RELEASES_PER_GROUP + revision - 1;
 }
-export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacement?: BannerRelease): Buffer {
+export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacement?: BannerRelease, backdropReplacement?: BackdropRelease): Buffer {
   const groups = store.groups().map(group => {
     const active = replacement?.groupId === group.id ? replacement : store.activeRelease(group.id);
     return {
@@ -38,11 +39,12 @@ export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacemen
       enabled: !!group.enabled, vrchatGroupUrl: group.tier === 'premium' ? group.vrchatUrl : null,
       atlasPoolIndex: active?.poolIndex ?? -1, revision: active?.revision ?? 0,
       billboardPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && bannerReplacement ? bannerReplacement : liveBillboard(store,group.id))?.poolIndex ?? -1) : -1,
+      backdropPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && backdropReplacement ? backdropReplacement : liveBackdrop(store,group.id))?.poolIndex ?? -1) : -1,
       atlasSha256: active?.sha256 ?? ''
     };
   });
   return Buffer.from(JSON.stringify({ schema: 1, brand: 'Wreckshop Worlds',
-    publisher: 'TwerkTaco & Resolve', generatedAt: new Date().toISOString(), groups }));
+    publisher: 'TwerkTaco & Resolve', groups }));
 }
 
 async function githubGetSha(config: PublishConfig, path: string): Promise<string | undefined> {
@@ -57,8 +59,10 @@ async function githubGetSha(config: PublishConfig, path: string): Promise<string
   return json.sha;
 }
 
-async function githubPut(config: PublishConfig, path: string, bytes: Buffer, message: string): Promise<void> {
+export async function githubPut(config: PublishConfig, path: string, bytes: Buffer, message: string): Promise<void> {
   const existing = await githubGetSha(config,path);
+  const blobSha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  if (existing === blobSha) return; // Retrying identical bytes must not trigger another Pages build.
   const endpoint = `https://api.github.com/repos/${config.owner}/${config.repository}/contents/${path}`;
   const response = await fetch(endpoint, { method: 'PUT', headers: {
     Authorization: `Bearer ${config.token}`, Accept: 'application/vnd.github+json',
@@ -68,10 +72,11 @@ async function githubPut(config: PublishConfig, path: string, bytes: Buffer, mes
   if (!response.ok) throw new Error(`GitHub upload failed: HTTP ${response.status}: ${(await response.text()).slice(0,300)}`);
 }
 
-async function verifyPublic(url: string, expectedSha: string, attempts = 12): Promise<void> {
+async function verifyPublic(url: string, expectedSha: string, attempts = 90): Promise<void> {
   for (let n = 0; n < attempts; n++) {
     try {
-      const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(20_000) });
+      const verificationUrl = new URL(url); verificationUrl.searchParams.set('release',expectedSha);
+      const response = await fetch(verificationUrl, { cache: 'no-store', signal: AbortSignal.timeout(20_000) });
       if (response.ok && sha(Buffer.from(await response.arrayBuffer())) === expectedSha) return;
     } catch { /* bounded retry; old catalog remains active */ }
     await new Promise(resolve => setTimeout(resolve, 10_000));
@@ -96,13 +101,15 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   const candidate: ReleaseRef = { groupId, revision, poolIndex: index,
     sha256: atlas.sha256, publicUrl: sameArtwork ? previous!.publicUrl : url };
   const banner = await prepareBillboard(store,groupId);
-  const nextCatalog = catalog(store,candidate,banner?.release);
+  const backdrop = await prepareBackdrop(store,groupId);
+  const nextCatalog = catalog(store,candidate,banner?.release,backdrop?.release);
 
   if (config.dryRun) {
     const out = join(config.dataDir,'dry-run');
     await mkdir(out,{recursive:true});
     await writeFile(join(out,`group-${groupId}-atlas.png`),atlas.bytes);
     if(banner)await writeFile(join(out,`group-${groupId}-billboard.png`),banner.bytes);
+    if(backdrop)await writeFile(join(out,`group-${groupId}-backdrop.png`),backdrop.bytes);
     await writeFile(join(out,'catalog.json'),nextCatalog);
     return `dry-run: ${out}`;
   }
@@ -116,17 +123,17 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
     await githubPut(config,banner.release.path,banner.bytes,`Publish Wreckshop group ${groupId} billboard`);
     await verifyPublic(`${publicBase}/${banner.release.path}`,banner.release.sha256);
   }
-  const catalogPath = 'catalog.json';
-  const oldCatalog = catalog(store);
-  try {
-    await githubPut(config,catalogPath,nextCatalog,`Activate Wreckshop group ${groupId} r${revision}`);
-    // JSON includes a generation timestamp, so hash verification also catches stale Pages responses.
-    await verifyPublic(`${publicBase}/${catalogPath}`,sha(nextCatalog));
-  } catch (error) {
-    await githubPut(config,catalogPath,oldCatalog,`Rollback Wreckshop catalog after failed activation`);
-    throw error;
+  if(backdrop && liveBackdrop(store,groupId)?.sha256 !== backdrop.release.sha256){
+    await githubPut(config,backdrop.release.path,backdrop.bytes,`Publish FBT Social group ${groupId} photo backdrop`);
+    await verifyPublic(`${publicBase}/${backdrop.release.path}`,backdrop.release.sha256);
   }
+  const catalogPath = 'catalog.json';
+  await githubPut(config,catalogPath,nextCatalog,`Activate Wreckshop group ${groupId} r${revision}`);
+  // Assets were verified before activation. A slow CDN is not a failed write:
+  // rolling back here creates another build and repeatedly cancels deployment.
+  await verifyPublic(`${publicBase}/${catalogPath}`,sha(nextCatalog));
   if(banner)store.setSetting(`billboard-live-${groupId}`,JSON.stringify(banner.release));
+  if(backdrop)store.setSetting(`backdrop-live-${groupId}`,JSON.stringify(backdrop.release));
   if (!sameArtwork) store.recordRelease(groupId,revision,index,atlas.sha256,url);
   store.db.prepare(`UPDATE submissions SET status='live',updated_at=CURRENT_TIMESTAMP
     WHERE id IN (SELECT submission_id FROM assignments WHERE group_id=?)`).run(groupId);

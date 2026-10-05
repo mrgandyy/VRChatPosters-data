@@ -1,3 +1,4 @@
+import { submitBackdrop, decideBackdrop } from './backdrop.js';
 import {
   ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client,
   GatewayIntentBits, MessageFlags, PermissionFlagsBits, SlashCommandBuilder,
@@ -70,6 +71,27 @@ async function handleBillboard(i:ChatInputCommandInteraction):Promise<void>{
     new ButtonBuilder().setCustomId(`ws:bannerreject:${submission}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
   await channel.send({content:`Billboard #${submission} for ${group.name}. Wide 4:1 entrance banner.`,files:[new AttachmentBuilder(paths.previewPath)],components:[row]});
   await i.editReply(`Billboard #${submission} saved for review. Approved artwork appears when your group code is selected in the world.`);
+}
+const backdrop = new SlashCommandBuilder().setName('backdrop').setDescription('Premium photo wall backdrop')
+  .addSubcommand(s=>s.setName('submit').setDescription('Upload a 4:3 photo backdrop for review')
+    .addIntegerOption(o=>o.setName('group').setDescription('Premium group ID').setRequired(true))
+    .addAttachmentOption(o=>o.setName('image').setDescription('Static PNG, JPEG or WebP, ideally 2048 x 1536').setRequired(true)));
+async function handleBackdrop(i:ChatInputCommandInteraction):Promise<void>{
+  const id=i.options.getInteger('group',true);
+  const group=requiredGroup(id);
+  if(!canManage(i,id))throw new Error('You do not represent this group.');
+  if(!group.enabled || group.tier!=='premium' || id===0)throw new Error('Backdrops require an enabled premium partner group.');
+  const channel=i.guild!.channels.cache.get(store.setting('approval_channel')??'');
+  if(!channel || channel.type!==ChannelType.GuildText)throw new Error('Approval channel is not configured.');
+  await i.deferReply({flags:ephemeral});
+  const attachment=i.options.getAttachment('image',true);
+  const paths=await saveSource(await downloadAttachment(attachment.url,attachment.size),dataDir);
+  const submission=submitBackdrop(store,id,i.user.id,paths.sourcePath,paths.previewPath);
+  const row=new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`ws:backdropapprove:${submission}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`ws:backdropreject:${submission}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
+  await channel.send({content:`Backdrop #${submission} for ${group.name}. 4:3 photo wall backdrop.`,files:[new AttachmentBuilder(paths.previewPath)],components:[row]});
+  await i.editReply(`Backdrop #${submission} saved for review. Approved artwork appears when your group code is selected in the world.`);
 }
 const group = new SlashCommandBuilder().setName('group').setDescription('Wreckshop group administration')
   .addSubcommand(s => s.setName('register').setDescription('Register a partner group')
@@ -389,6 +411,11 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
     await i.reply({ content: lines.length ? lines.join('\n') : 'Nothing to show yet.', flags: ephemeral });
     return;
   }
+  if (action === 'backdropapprove' || action === 'backdropreject') {
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    decideBackdrop(store,Number(rawId),i.user.id,action === 'backdropapprove');
+    await i.update({ content: `${i.message.content}\n${action === 'backdropapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] }); return;
+  }
   if (action === 'bannerapprove' || action === 'bannerreject') {
     if (!reviewer(i)) throw new Error('Reviewer access is required.');
     decideBillboard(store,Number(rawId),i.user.id,action === 'bannerapprove');
@@ -410,12 +437,13 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.guildId !== guildId) throw new Error('Use this in the configured server.');
     if (interaction.commandName === 'ws-setup') await handleSetup(interaction);
+    else if (interaction.commandName === 'backdrop') await handleBackdrop(interaction);
     else if (interaction.commandName === 'billboard') await handleBillboard(interaction);
     else if (interaction.commandName === 'poster') await handlePoster(interaction);
     else if (interaction.commandName === 'group') await handleGroup(interaction);
     else if (interaction.commandName === 'publish') await handlePublish(interaction);
     else if (interaction.commandName === 'ws-help') await interaction.reply({ content:
-      'Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit`. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
+      'Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {
@@ -434,12 +462,22 @@ client.once('ready', async () => {
     } else console.log(`SHXTTY pilot already registered as group ${pilot.id}.`);
   }
   const guild = await client.guilds.fetch(guildId);
-  await guild.commands.set([poster,group,setup,publish,help,billboard]);
+  await guild.commands.set([poster,group,setup,publish,help,billboard,backdrop]);
   if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
     try { await ensureGuildSetup(guild); console.log('Wreckshop channels and panel ready.'); }
     catch (error) { console.error('Automatic channel setup failed:',error); }
   }
   if (!publishConfig.dryRun && !store.activeRelease(0)) store.queuePublish(0);
+  // One-time recovery of the most recent job affected by the Pages outage.
+  if (!publishConfig.dryRun && !store.setting('pages-recovery-20261005')) {
+    const failed = store.db.prepare(`SELECT group_id AS groupId FROM jobs j
+      WHERE id=(SELECT MAX(id) FROM jobs WHERE group_id=j.group_id)
+      AND (status='publishing' OR (status='failed' AND error LIKE '%Public asset did not match%'))`)
+      .all() as { groupId: number }[];
+    for (const row of failed) store.queuePublish(row.groupId);
+    store.setSetting('pages-recovery-20261005','queued');
+    console.log(`Queued ${failed.length} interrupted public-data publications for recovery.`);
+  }
   console.log('Wreckshop Worlds service ready.');
   setInterval(async () => {
     if (publishing) return;
@@ -452,3 +490,4 @@ client.once('ready', async () => {
   },30_000);
 });
 await client.login(token);
+

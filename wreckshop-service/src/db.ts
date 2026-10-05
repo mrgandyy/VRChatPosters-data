@@ -1,3 +1,4 @@
+import { initializeBackdrops } from './backdrop.js';
 import Database from 'better-sqlite3';
 import { initializeBillboards } from './billboard.js';
 import { randomInt } from 'node:crypto';
@@ -53,6 +54,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
     initializeBillboards(this);
+    initializeBackdrops(this);
     const columns = this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[];
     if (!columns.some(column => column.name === 'agreement_by'))
       this.db.exec('ALTER TABLE groups ADD COLUMN agreement_by TEXT');
