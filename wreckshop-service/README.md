@@ -1,5 +1,15 @@
 # Wreckshop Worlds service
 
+## Group management (6 October 2026)
+
+Each Discord user may represent only one group, including admins acting as representatives. Administrative access still lets admins manage all groups. Registration repeats return the existing group, and a VRChat group ID cannot be registered twice. `/group rename group:<number> name:<actual group name>` changes a represented group; `/group delete group:<number> confirm:true` removes it from the catalog and releases its Discord assignments. Admins may also use these controls. Linking is available to standard groups for identity configuration; the in-world Join Group button remains Premium-only.
+
+On startup, duplicate VRChat identities, or duplicate names with the same representative and no conflicting VRChat IDs, are archived automatically. Empty unrepresented seed entries also yield to a matching real group. Prefer Premium, then more assigned artwork, then linked/represented entries, then oldest ID. Distinct represented groups with matching names are retained. Discord users with multiple distinct legacy assignments retain the oldest assignment; the groups themselves remain. Archived entries retain artwork, approval history, codes and immutable URL slots for recovery. Their codes no longer activate groups. Delete does not reclaim the finite preauthored atlas URL capacity: overwriting published immutable URLs would break cached world artwork. The first migration makes a consistent SQLite snapshot alongside the database before cleanup; duplicate mappings are recorded in settings.
+
+The owner selected manual group names instead of authenticated VRChat name lookup. `name` requires the actual group name and rejects pasted URLs and grp_ IDs with instructions. Put an optional official VRChat URL or ID in `vrchat_group` when registering, or use `/group link` afterward. Linking never overwrites the name. Use `/group rename` to correct existing URL-named entries. No VRChat account/session or automatic API lookup is required.
+
+The dancer whitelist and dancer self-claim feature were deferred by the owner and are not included in this change.
+
 One Discord bot process holds the SQLite database and publishes 2048 × 2048 poster atlases. The bot is for Wreckshop Worlds by TwerkTaco & Resolve; SHXTTY is one possible premium partner. Standard groups can replace slots 1–8, premium groups 1–16. Unassigned slots use the 16 bundled default artworks. Codes are public preset selectors and never confer in-world roles.
 
 ## Local dry run

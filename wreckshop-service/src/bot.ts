@@ -1,5 +1,5 @@
 import { submitBackdrop, decideBackdrop } from './backdrop.js';
-import { groupLinkPrompt } from './group-link.js';
+import { groupLinkPrompt, validateGroupName } from './group-link.js';
 import {
   ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client,
   GatewayIntentBits, MessageFlags, PermissionFlagsBits, SlashCommandBuilder,
@@ -96,7 +96,7 @@ async function handleBackdrop(i:ChatInputCommandInteraction):Promise<void>{
 }
 const group = new SlashCommandBuilder().setName('group').setDescription('Wreckshop group administration')
   .addSubcommand(s => s.setName('register').setDescription('Register a partner group')
-    .addStringOption(o => o.setName('name').setDescription('Group name').setRequired(true))
+    .addStringOption(o => o.setName('name').setDescription('Actual group name, NOT a link or grp_ ID').setRequired(true))
     .addStringOption(o => o.setName('vrchat_group').setDescription('Required for Premium: your VRChat grp_ UUID or official group page URL'))
     .addStringOption(o => o.setName('tier').setDescription('Tier').addChoices(
       { name: 'Standard', value: 'standard' },{ name: 'Premium', value: 'premium' })))
@@ -126,7 +126,13 @@ const group = new SlashCommandBuilder().setName('group').setDescription('Wrecksh
     .addBooleanOption(o => o.setName('agree').setDescription('I agree to follow VRChat rules').setRequired(true)))
   .addSubcommand(s => s.setName('recognition').setDescription('Refresh representative names on the entrance board')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true)))
-  .addSubcommand(s => s.setName('mine').setDescription('View groups you represent'));
+  .addSubcommand(s => s.setName('rename').setDescription('Change your group name')
+    .addIntegerOption(o => o.setName('group').setDescription('Group number').setRequired(true))
+    .addStringOption(o => o.setName('name').setDescription('New actual group name, NOT a link or grp_ ID').setRequired(true)))
+  .addSubcommand(s => s.setName('delete').setDescription('Remove your group from the active catalog')
+    .addIntegerOption(o => o.setName('group').setDescription('Group number').setRequired(true))
+    .addBooleanOption(o => o.setName('confirm').setDescription('Confirm removing this group').setRequired(true)))
+  .addSubcommand(s => s.setName('mine').setDescription('View your group'));
 const setup = new SlashCommandBuilder().setName('ws-setup').setDescription('Set up Wreckshop channels and panel')
   .addChannelOption(o => o.setName('submissions').setDescription('Existing public submission channel'))
   .addChannelOption(o => o.setName('help').setDescription('Existing public help channel'))
@@ -134,6 +140,7 @@ const setup = new SlashCommandBuilder().setName('ws-setup').setDescription('Set 
   .addChannelOption(o => o.setName('logs').setDescription('Existing private log channel'))
   .addRoleOption(o => o.setName('reviewer_role').setDescription('Role that can review submissions'))
   .addRoleOption(o => o.setName('admin_role').setDescription('Role that can manage partners'));
+
 const publish = new SlashCommandBuilder().setName('publish').setDescription('Publishing status and recovery')
   .addSubcommand(s => s.setName('status').setDescription('Show recent publishing jobs'))
   .addSubcommand(s => s.setName('retry').setDescription('Retry a failed group publication')
@@ -367,22 +374,40 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   }
   if (sub === 'register') {
     if (i.options.getString('tier') === 'premium' && !admin(i)) throw new Error('Premium is assigned by Wreckshop admins. Register a standard group first.');
+    const name = validateGroupName(i.options.getString('name',true));
     const vrchatGroup = i.options.getString('vrchat_group') ?? undefined;
     if (i.options.getString('tier') === 'premium' && !vrchatGroup) throw new Error('Premium groups need their VRChat group ID. Provide vrchat_group:grp_<your-group-UUID>, found in your VRChat group page URL.');
-    const group = store.registerGroup(i.options.getString('name',true),
-      i.options.getString('tier') === 'premium' ? 'premium' : 'standard', vrchatGroup);
-    store.addRepresentative(group.id,i.user.id);
+    await i.deferReply({flags:ephemeral});
+    const group = store.registerGroup(name,
+      i.options.getString('tier') === 'premium' ? 'premium' : 'standard', vrchatGroup,i.user.id);
     store.setSetting(`representative-name-${i.user.id}`,'@'+i.user.username);
     store.queuePublish(group.id);
-    await i.reply({ content: `Registered #${group.id} ${group.name}. Shareable code: ${group.code}. You are its representative. ${groupLinkPrompt(group)} Use /poster submit or /poster batch to upload artwork.`, flags: ephemeral });
+    await i.editReply({ content: `Your group is #${group.id} ${group.name}. Shareable code: ${group.code}. ${groupLinkPrompt(group)} Use /group rename or /group delete to manage it, and /poster submit or /poster batch for artwork.`, allowedMentions:{parse:[]} });
     await auditLog(i.guild,`Group #${group.id} ${group.name} registered by <@${i.user.id}> as ${group.tier}.`);
     return;
   }
   const groupId = i.options.getInteger('group',true);
   requiredGroup(groupId);
-  if ((sub === 'page' || sub === 'link') && requiredGroup(groupId).tier !== 'premium') throw new Error('Join group is available for Premium groups only.');
-  if (sub === 'page' || sub === 'link' || sub === 'code' || sub === 'recognition') { if (!canManage(i,groupId)) throw new Error('You do not represent this group.'); }
+  if (sub === 'page' || sub === 'link' || sub === 'code' || sub === 'recognition' || sub === 'rename' || sub === 'delete') { if (!canManage(i,groupId)) throw new Error('You do not represent this group.'); }
   else if (!admin(i)) throw new Error('Wreckshop admin access is required.');
+  if(sub==='delete') {
+    if(!i.options.getBoolean('confirm',true)) throw new Error('Group was not deleted. Set confirm:true to remove it.');
+    if(publishing) throw new Error('A publication is in progress. Try deleting again when it finishes.');
+    const name=requiredGroup(groupId).name;
+    store.deleteGroup(groupId);
+    await i.reply({content:`Deleted #${groupId} ${name} from the active groups. Catalog update queued. You can now register another group.`,flags:ephemeral,allowedMentions:{parse:[]}});
+    await auditLog(i.guild,`Group #${groupId} deleted by <@${i.user.id}>.`);
+    return;
+  }
+  if(sub==='rename' || sub==='page' || sub==='link') {
+    await i.deferReply({flags:ephemeral});
+    const value=sub==='rename' ? i.options.getString('name',true) : i.options.getString(sub==='page' ? 'url':'vrchat_group',true);
+    if(sub==='rename') store.renameGroup(groupId,value);
+    else store.setUrl(groupId,value);
+    await i.editReply({content:`Updated #${groupId} ${requiredGroup(groupId).name}. Publication queued.`,allowedMentions:{parse:[]}});
+    await auditLog(i.guild,`Group #${groupId} ${sub} updated by <@${i.user.id}>.`);
+    return;
+  }
   if (sub === 'representative') {
     const user = i.options.getUser('user',true);
     if (i.options.getString('action',true) === 'add') store.addRepresentative(groupId,user.id);
@@ -471,7 +496,8 @@ client.on('interactionCreate', async interaction => {
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {
-      if (interaction.deferred || interaction.replied) await interaction.followUp({ content: message, flags: ephemeral }).catch(() => undefined);
+      if (interaction.deferred && !interaction.replied) await interaction.editReply({ content: message, allowedMentions:{parse:[]} }).catch(() => undefined);
+      else if (interaction.replied) await interaction.followUp({ content: message, flags: ephemeral,allowedMentions:{parse:[]} }).catch(() => undefined);
       else await interaction.reply({ content: message, flags: ephemeral }).catch(() => undefined);
     }
   }

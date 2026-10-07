@@ -17,3 +17,15 @@ export function groupLinkPrompt(group: { id: number; tier: string; vrchatUrl: st
   return group.vrchatUrl ? `Join group: ${group.vrchatUrl}` :
     `Please add your VRChat group ID: /group link group:${group.id} vrchat_group:grp_<your-group-UUID>. Find it in your group's VRChat.com page URL. Join group stays hidden until you add it.`;
 }
+
+export function isGroupReference(value: string): boolean {
+  return /^(grp_|https?:\/\/)/i.test(value.trim());
+}
+
+export function validateGroupName(value:string): string {
+  const name=value.trim();
+  if(isGroupReference(name) || /vrchat\.com\/home\/group\//i.test(name))
+    throw new Error('Use your actual group name in name, not a link or grp_ ID. Put the VRChat link or ID in vrchat_group when registering, or use /group link afterward.');
+  if(!name || name.length>80 || /[\r\n\x00-\x1f]/.test(name)) throw new Error('Group name must be 1–80 characters.');
+  return name;
+}

@@ -17,7 +17,7 @@ test('registration stores validated link atomically; only premium destinations a
  const dir=mkdtempSync(join(tmpdir(),'ws-grouplink-'));const store=new Store(join(dir,'test.db'));
  try{
   const before=store.groups().length;assert.throws(()=>store.registerGroup('Invalid','premium','grp_no'));assert.equal(store.groups().length,before);
-  const standard=store.registerGroup('Standard','standard',id);const premium=store.registerGroup('Premium','premium',id);
+  const standard=store.registerGroup('Standard','standard','grp_aaaaaaaa-2222-3333-4444-555555555555');const premium=store.registerGroup('Premium','premium',id);
   const groups=JSON.parse(catalog(store).toString()).groups;
   assert.equal(groups.find((g:any)=>g.id===standard.id).vrchatGroupUrl,null);
   assert.equal(groups.find((g:any)=>g.id===premium.id).vrchatGroupUrl,normalizeGroupLink(id));

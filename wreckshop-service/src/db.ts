@@ -1,5 +1,5 @@
 import { initializeBackdrops } from './backdrop.js';
-import { normalizeGroupLink } from './group-link.js';
+import { normalizeGroupLink, isGroupReference, validateGroupName } from './group-link.js';
 import Database from 'better-sqlite3';
 import { initializeBillboards } from './billboard.js';
 import { randomInt } from 'node:crypto';
@@ -57,13 +57,18 @@ export class Store {
     initializeBillboards(this);
     initializeBackdrops(this);
     const columns = this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[];
+    if(path!==':memory:' && !columns.some(column=>column.name==='deleted'))
+      this.db.prepare('VACUUM INTO ?').run(`${path}.before-group-management-${Date.now()}.sqlite`);
     if (!columns.some(column => column.name === 'agreement_by'))
       this.db.exec('ALTER TABLE groups ADD COLUMN agreement_by TEXT');
+    if (!columns.some(column => column.name === 'deleted'))
+      this.db.exec('ALTER TABLE groups ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
     this.db.prepare("UPDATE jobs SET status='queued' WHERE status='publishing'").run();
     this.db.prepare(`INSERT OR IGNORE INTO groups(id,name,tier,code,enabled,atlas_slot)
       VALUES(0,'Wreckshop Worlds','premium','00000000',1,0)`).run();
     this.db.prepare('UPDATE groups SET name=? WHERE id=0 AND lower(name)=lower(?)')
       .run('Wreckshop Worlds',`${LEGACY_BRAND} Worlds`);
+    this.cleanupDuplicates();
   }
 
   close(): void { this.db.close(); }
@@ -77,30 +82,95 @@ export class Store {
   group(id: number): Group | undefined {
     return this.db.prepare(`SELECT id,name,tier,code,enabled,vrchat_url AS vrchatUrl,
       agreement_version AS agreementVersion,agreement_at AS agreementAt,
-      atlas_slot AS atlasSlot,revision FROM groups WHERE id=?`).get(id) as Group | undefined;
+      atlas_slot AS atlasSlot,revision FROM groups WHERE id=? AND deleted=0`).get(id) as Group | undefined;
   }
   groupByCode(code: string): Group | undefined {
     return this.db.prepare(`SELECT id,name,tier,code,enabled,vrchat_url AS vrchatUrl,
       agreement_version AS agreementVersion,agreement_at AS agreementAt,
-      atlas_slot AS atlasSlot,revision FROM groups WHERE code=?`).get(code) as Group | undefined;
+      atlas_slot AS atlasSlot,revision FROM groups WHERE code=? AND deleted=0`).get(code) as Group | undefined;
   }
   groups(): Group[] {
     return this.db.prepare(`SELECT id,name,tier,code,enabled,vrchat_url AS vrchatUrl,
       agreement_version AS agreementVersion,agreement_at AS agreementAt,
-      atlas_slot AS atlasSlot,revision FROM groups ORDER BY id`).all() as Group[];
+      atlas_slot AS atlasSlot,revision FROM groups WHERE deleted=0 ORDER BY id`).all() as Group[];
   }
-  registerGroup(name: string, tier: Tier = 'standard', vrchatGroup?: string): Group {
+  registerGroup(name: string, tier: Tier = 'standard', vrchatGroup?: string, userId?: string): Group {
+    return this.db.transaction(() => {
     const vrchatUrl = vrchatGroup === undefined ? null : normalizeGroupLink(vrchatGroup);
-    if (!name.trim() || name.length > 80) throw new Error('Group name must be 1–80 characters.');
+    name=validateGroupName(name);
+    const existing = vrchatUrl ? this.groups().find(g => g.vrchatUrl === vrchatUrl) : undefined;
+    if (existing) {
+      if (!userId || !this.canRepresent(existing.id,userId)) throw new Error(`This VRChat group is already registered as #${existing.id}. Ask its representative or an admin for access.`);
+      return this.group(existing.id)!;
+    }
+    const represented=userId ? this.representedGroups(userId)[0] : undefined;
+    if (represented) {
+      if(!vrchatUrl && represented.name.trim().toLowerCase()===name.trim().toLowerCase()) return represented;
+      throw new Error(`You already represent group #${represented.id}. Rename or delete it instead of registering another.`);
+    }
     const count = this.db.prepare('SELECT COUNT(*) AS n FROM groups').get() as { n: number };
     if (count.n >= 32) throw new Error('Authored atlas URL capacity is 32 groups.');
     let code = '';
     do { code = randomInt(0, 100_000_000).toString().padStart(8, '0'); }
-    while (this.groupByCode(code));
+    while (this.db.prepare('SELECT 1 FROM groups WHERE code=?').get(code));
     const slot = count.n;
     const id = Number(this.db.prepare(`INSERT INTO groups(name,tier,code,atlas_slot,vrchat_url)
       VALUES(?,?,?,?,?)`).run(name.trim(), tier, code, slot,vrchatUrl).lastInsertRowid);
+    if (userId) this.addRepresentative(id,userId);
     return this.group(id)!;
+    })();
+  }
+  renameGroup(id: number, name: string): void {
+    if (id === 0 || !this.group(id)) throw new Error('Group cannot be renamed.');
+    name=validateGroupName(name);
+    this.db.prepare('UPDATE groups SET name=? WHERE id=?').run(name.trim(),id);
+    this.queuePublish(id);
+  }
+  deleteGroup(id: number): void {
+    if (id === 0 || !this.group(id)) throw new Error('Group cannot be deleted.');
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE groups SET deleted=1,enabled=0 WHERE id=?').run(id);
+      this.db.prepare('DELETE FROM representatives WHERE group_id=?').run(id);
+      this.db.prepare("UPDATE jobs SET status='cancelled' WHERE group_id=? AND status IN ('queued','publishing','failed')").run(id);
+      this.queuePublish(0);
+    })();
+  }
+  cleanupDuplicates(): number {
+    return this.db.transaction(() => {
+      let removed=0;
+      for(const g of this.groups()) if(g.id!==0 && !g.vrchatUrl && isGroupReference(g.name)) {
+        try {const url=normalizeGroupLink(g.name);this.db.prepare('UPDATE groups SET vrchat_url=? WHERE id=?').run(url,g.id);}
+        catch { /* malformed historical text requires manual correction */ }
+      }
+      // Prefer premium/artwork, then linked/represented entries, then oldest ID.
+      const rows=this.groups().filter(g=>g.id!==0).sort((a,b)=>
+        Number(b.tier==='premium')-Number(a.tier==='premium') || this.assigned(b.id).size-this.assigned(a.id).size ||
+        Number(!!b.vrchatUrl)-Number(!!a.vrchatUrl) || Number(this.hasRepresentatives(b.id))-Number(this.hasRepresentatives(a.id)) || a.id-b.id);
+      const kept: Group[]=[];
+      for (const g of rows) {
+        const same=kept.find(k=> (g.vrchatUrl && g.vrchatUrl===k.vrchatUrl) ||
+          ((!g.vrchatUrl || !k.vrchatUrl) && g.name.trim().toLowerCase()===k.name.trim().toLowerCase() &&
+            (!!this.db.prepare('SELECT 1 FROM representatives a JOIN representatives b ON a.user_id=b.user_id WHERE a.group_id=? AND b.group_id=?').get(g.id,k.id) ||
+              (!g.vrchatUrl && !this.hasRepresentatives(g.id) && this.assigned(g.id).size===0 && this.submissions(g.id).length===0))));
+        if (!same) {kept.push(g); continue;}
+        // Archive duplicate artwork/history intact; migrate only nonconflicting representatives.
+        this.db.prepare('INSERT OR IGNORE INTO representatives(group_id,user_id) SELECT ?,user_id FROM representatives WHERE group_id=?').run(same.id,g.id);
+        this.setSetting(`duplicate-group-${g.id}`,JSON.stringify({canonicalId:same.id,name:g.name,archivedAt:new Date().toISOString()}));
+        this.deleteGroup(g.id); removed++;
+      }
+      const reps=this.db.prepare('SELECT user_id,group_id FROM representatives ORDER BY group_id').all() as {user_id:string;group_id:number}[];
+      const seen=new Set<string>();
+      for(const r of reps) {
+        if(seen.has(r.user_id)) {this.removeRepresentative(r.group_id,r.user_id); removed++;}
+        else seen.add(r.user_id);
+      }
+      this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS one_group_per_discord_user ON representatives(user_id); CREATE UNIQUE INDEX IF NOT EXISTS one_vrchat_group ON groups(vrchat_url) WHERE deleted=0 AND vrchat_url IS NOT NULL');
+      if(removed) this.queuePublish(0);
+      return removed;
+    })();
+  }
+  private hasRepresentatives(id:number): boolean {
+    return !!this.db.prepare('SELECT 1 FROM representatives WHERE group_id=? LIMIT 1').get(id);
   }
   setTier(groupId: number, tier: Tier): void {
     if (groupId === 0) throw new Error('Default configuration stays premium.');
@@ -125,6 +195,7 @@ export class Store {
   }
   setUrl(groupId: number, url: string | null): void {
     if (url !== null) url = normalizeGroupLink(url);
+    if (url && this.groups().some(g=>g.id!==groupId && g.vrchatUrl===url)) throw new Error('That VRChat group is already registered.');
     this.db.prepare('UPDATE groups SET vrchat_url=? WHERE id=?').run(url, groupId);
     this.queuePublish(groupId);
   }
@@ -133,6 +204,9 @@ export class Store {
       .run(version, userId, groupId);
   }
   addRepresentative(groupId: number, userId: string): void {
+    if (!this.group(groupId)) throw new Error('Group is unavailable.');
+    const existing=this.representedGroups(userId).find(g=>g.id!==groupId);
+    if(existing) throw new Error(`This Discord user already represents group #${existing.id}. Remove that assignment first.`);
     this.db.prepare('INSERT OR IGNORE INTO representatives(group_id,user_id) VALUES(?,?)').run(groupId,userId);
   }
   removeRepresentative(groupId: number, userId: string): void {
