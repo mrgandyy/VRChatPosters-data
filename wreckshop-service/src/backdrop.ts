@@ -2,6 +2,7 @@ import sharp from 'sharp';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { Store } from './db.js';
+import { assetPath, reserveUrl } from './url-pool.js';
 
 export interface Backdrop { id:number; groupId:number; sourcePath:string; previewPath:string; status:string }
 export interface BackdropRelease { poolIndex:number; sha256:string; path:string }
@@ -46,9 +47,8 @@ export async function prepareBackdrop(store:Store,groupId:number):Promise<{relea
   const history=JSON.parse(store.setting(`backdrop-releases-${groupId}`)??'[]') as BackdropRelease[];
   let release=history.find(r=>r.sha256===sha256);
   if(!release){
-    if(history.length>=8)throw new Error('Backdrop release URL capacity exhausted; expand URL pool and reupload world.');
-    const revision=history.length+1;
-    release={poolIndex:group.atlasSlot*8+revision-1,sha256,path:`backdrops/g${String(group.atlasSlot).padStart(2,'0')}-r${String(revision).padStart(2,'0')}.png`};
+    const index=reserveUrl(store,'backdrop',`${groupId}:${sha256}`);
+    release={poolIndex:index,sha256,path:assetPath('backdrop',index)};
     history.push(release);
     // Reserve immutable URL even if publication later fails; retries reuse the same bytes.
     store.setSetting(`backdrop-releases-${groupId}`,JSON.stringify(history));

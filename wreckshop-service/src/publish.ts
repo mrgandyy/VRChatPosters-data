@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { buildAtlas } from './atlas.js';
 import type { Store } from './db.js';
 import type { Group } from './types.js';
+import { assetPath, reserveUrl } from './url-pool.js';
 
 export const RELEASES_PER_GROUP = 8;
 export const GROUP_CAPACITY = 32;
@@ -26,9 +27,6 @@ export function sheetBRelease(store: Store, groupId: number, revision: number): 
 }
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
-function atlasPath(group: Group, revision: number): string {
-  return `atlases/g${group.atlasSlot.toString().padStart(2,'0')}-r${revision.toString().padStart(2,'0')}.png`;
-}
 export function poolIndex(group: Group, revision: number): number {
   if (group.atlasSlot < 0 || group.atlasSlot >= GROUP_CAPACITY ||
       revision < 1 || revision > RELEASES_PER_GROUP)
@@ -122,8 +120,8 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   const revision = sameArtwork ? previous!.revision :
     ((store.db.prepare('SELECT COALESCE(MAX(revision),0) AS n FROM releases WHERE group_id=?')
       .get(groupId) as { n: number }).n + 1);
-  const index = sameArtwork ? previous!.poolIndex : poolIndex(group,revision);
-  const relative = atlasPath(group,revision);
+  const index = sameArtwork ? previous!.poolIndex : reserveUrl(store,'atlas',`${atlas.sha256}:${atlasB.sha256}`);
+  const relative = assetPath('atlas',index);
   const relativeB = relative.replace(/\.png$/, '-b.png');
   const publicBase = config.publicBase?.replace(/\/$/, '');
   if (!publicBase) throw new Error('GITHUB_PUBLIC_BASE is required.');

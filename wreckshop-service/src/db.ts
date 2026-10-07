@@ -7,6 +7,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { assertSlot, type Group, type Submission, type Tier } from './types.js';
 import { LEGACY_BRAND } from './branding.js';
+import { initializeUrlPool } from './url-pool.js';
 
 export class Store {
   readonly db: Database.Database;
@@ -70,6 +71,7 @@ export class Store {
     this.db.prepare('UPDATE groups SET name=? WHERE id=0 AND lower(name)=lower(?)')
       .run('Wreckshop Worlds',`${LEGACY_BRAND} Worlds`);
     this.cleanupDuplicates();
+    initializeUrlPool(this,path);
   }
 
   private migratePosterCapacity(path: string): void {
@@ -130,12 +132,11 @@ export class Store {
       if(!vrchatUrl && represented.name.trim().toLowerCase()===name.trim().toLowerCase()) return represented;
       throw new Error(`You already represent group #${represented.id}. Rename or delete it instead of registering another.`);
     }
-    const count = this.db.prepare('SELECT COUNT(*) AS n FROM groups').get() as { n: number };
-    if (count.n >= 32) throw new Error('Authored atlas URL capacity is 32 groups.');
+    const next = this.db.prepare('SELECT COALESCE(MAX(atlas_slot),-1)+1 AS n FROM groups').get() as { n: number };
     let code = '';
     do { code = randomInt(0, 100_000_000).toString().padStart(8, '0'); }
     while (this.db.prepare('SELECT 1 FROM groups WHERE code=?').get(code));
-    const slot = count.n;
+    const slot = next.n;
     const id = Number(this.db.prepare(`INSERT INTO groups(name,tier,code,atlas_slot,vrchat_url)
       VALUES(?,?,?,?,?)`).run(name.trim(), tier, code, slot,vrchatUrl).lastInsertRowid);
     if (userId) this.addRepresentative(id,userId);

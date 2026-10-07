@@ -35,7 +35,7 @@ test('slot 32 changes only sheet B; dry run emits both sheets and advertises B w
   assert.equal((await buildAtlas(store,0,defaults)).sha256,before.sha256);
   const b=await buildAtlas(store,0,defaults,1);const pixel=await sharp(b.bytes).extract({left:1792,top:1792,width:1,height:1}).removeAlpha().raw().toBuffer();assert.deepEqual([...pixel],[255,0,85]);
   await publishGroup(store,0,{branch:'main',publicBase:'https://example.test',defaultsDir:defaults,dataDir:dir,dryRun:true});
-  const output=JSON.parse(readFileSync(join(dir,'dry-run/catalog.json'),'utf8'));assert.equal(output.groups[0].atlasBPoolIndex,0);
+  const output=JSON.parse(readFileSync(join(dir,'dry-run/catalog.json'),'utf8'));assert.equal(output.groups[0].atlasBPoolIndex,output.groups[0].atlasPoolIndex);assert.ok(output.groups[0].atlasPoolIndex>=0);
   assert.ok(readFileSync(join(dir,'dry-run/group-0-atlas-b.png')).length>0);assert.equal(store.activeRelease(0),undefined);
   const legacy=JSON.parse(catalog(store).toString());assert.equal(legacy.groups[0].atlasBPoolIndex,-1);
  }finally{store.close();rmSync(dir,{recursive:true,force:true});}

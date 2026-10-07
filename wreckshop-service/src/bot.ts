@@ -13,6 +13,7 @@ import { MAX_SOURCE_BYTES, saveSource } from './atlas.js';
 import { activateRollback, processOneJob, type PublishConfig } from './publish.js';
 import { assertSlot, type Group } from './types.js';
 import { acceptsButtonPrefix, databasePath, legacyName, rebrand } from './branding.js';
+import { URL_POOL_CAPACITY } from './url-pool.js';
 
 const token = process.env.DISCORD_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID;
@@ -430,7 +431,12 @@ async function handlePublish(i: ChatInputCommandInteraction): Promise<void> {
   if (sub === 'status') {
     const rows = store.db.prepare('SELECT id,group_id,status,attempts,error FROM jobs ORDER BY id DESC LIMIT 12').all() as
       { id:number; group_id:number; status:string; attempts:number; error:string|null }[];
-    await i.reply({ content: rows.length ? rows.map(r => `#${r.id} group ${r.group_id}: ${r.status} · attempts ${r.attempts}${r.error ? ` · ${r.error.slice(0,100)}` : ''}`).join('\n') : 'No jobs.', flags: ephemeral });
+    const pools = (['atlas','billboard','backdrop'] as const).map(kind => {
+      const used=(store.db.prepare('SELECT COUNT(*) AS n FROM url_reservations WHERE kind=?').get(kind) as {n:number}).n;
+      return `${kind}: ${used}/${URL_POOL_CAPACITY} reserved${used>=URL_POOL_CAPACITY*.8 ? ' — capacity warning' : ''}`;
+    }).join(' · ');
+    const jobs=rows.length ? rows.map(r => `#${r.id} group ${r.group_id}: ${r.status} · attempts ${r.attempts}${r.error ? ` · ${r.error.slice(0,100)}` : ''}`).join('\n') : 'No jobs.';
+    await i.reply({ content: `${pools}\n${jobs}`.slice(0,2000), flags: ephemeral });
     return;
   }
   const groupId = i.options.getInteger('group',true);

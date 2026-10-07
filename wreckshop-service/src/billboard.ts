@@ -2,6 +2,7 @@ import sharp from 'sharp';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { Store } from './db.js';
+import { assetPath, reserveUrl } from './url-pool.js';
 
 export interface Banner { id:number; groupId:number; sourcePath:string; previewPath:string; status:string }
 export interface BannerRelease { poolIndex:number; sha256:string; path:string }
@@ -46,9 +47,8 @@ export async function prepareBillboard(store:Store,groupId:number):Promise<{rele
   const history=JSON.parse(store.setting(`billboard-releases-${groupId}`)??'[]') as BannerRelease[];
   let release=history.find(r=>r.sha256===sha256);
   if(!release){
-    if(history.length>=8)throw new Error('Billboard release URL capacity exhausted; expand URL pool and reupload world.');
-    const revision=history.length+1;
-    release={poolIndex:group.atlasSlot*8+revision-1,sha256,path:`billboards/g${String(group.atlasSlot).padStart(2,'0')}-r${String(revision).padStart(2,'0')}.png`};
+    const index=reserveUrl(store,'billboard',`${groupId}:${sha256}`);
+    release={poolIndex:index,sha256,path:assetPath('billboard',index)};
     history.push(release);
     // Reserve immutable URL even if publication later fails; retries reuse the same bytes.
     store.setSetting(`billboard-releases-${groupId}`,JSON.stringify(history));
