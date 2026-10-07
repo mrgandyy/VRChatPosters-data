@@ -285,8 +285,21 @@ export class Store {
       .run(groupId).lastInsertRowid);
   }
   nextJob(): { id: number; groupId: number; attempts: number } | undefined {
-    return this.db.prepare(`SELECT id,group_id AS groupId,attempts FROM jobs
-      WHERE status='queued' ORDER BY id LIMIT 1`).get() as { id: number; groupId: number; attempts: number } | undefined;
+    // Fresh approvals take priority. Retry only the latest failed job for a group,
+    // with a cooldown and a finite budget; never replay superseded publications.
+    return this.db.prepare(`SELECT id,group_id AS groupId,attempts FROM jobs j
+      WHERE status='queued' OR (
+        status='failed' AND attempts < 3
+        AND updated_at <= datetime('now','-2 minutes')
+        AND id=(SELECT MAX(id) FROM jobs WHERE group_id=j.group_id)
+        AND EXISTS (SELECT 1 FROM groups WHERE id=j.group_id AND deleted=0)
+        AND (error LIKE '%Public asset did not match the release hash:%'
+          OR error LIKE '%GitHub%failed: HTTP 5%'
+          OR error LIKE '%GitHub%failed: HTTP 429%'
+          OR error LIKE '%fetch failed%'
+          OR error LIKE '%TimeoutError:%'))
+      ORDER BY CASE WHEN status='queued' THEN 0 ELSE 1 END,id LIMIT 1`)
+      .get() as { id: number; groupId: number; attempts: number } | undefined;
   }
   markJob(id: number, status: string, error: string | null = null): void {
     this.db.prepare(`UPDATE jobs SET status=?,error=?,updated_at=CURRENT_TIMESTAMP,

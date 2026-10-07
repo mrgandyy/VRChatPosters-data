@@ -14,10 +14,10 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.retry.outputs.page_url || steps.final.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/configure-pages@v5
@@ -32,6 +32,29 @@ jobs:
       - uses: actions/upload-pages-artifact@v4
         with:
           path: _site
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Deploy verified static files
         id: deployment
+        continue-on-error: true
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Back off after Pages failure
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+      - name: Retry Pages deployment
+        if: steps.deployment.outcome == 'failure'
+        id: retry
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Back off before final attempt
+        if: steps.retry.outcome == 'failure'
+        run: sleep 60
+      - name: Final Pages deployment attempt
+        if: steps.retry.outcome == 'failure'
+        id: final
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}

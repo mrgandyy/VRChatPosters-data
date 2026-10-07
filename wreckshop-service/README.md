@@ -1,5 +1,11 @@
 # Wreckshop Worlds service
 
+## Publishing recovery (7 October 2026)
+
+Pages deployments use a unique artifact name for each run attempt and retry failed deployment steps twice with backoff. If an asset or catalog is already committed but is missing or stale on Pages, the publisher commits a hidden `.pages-recovery.json` marker to trigger a fresh deployment before verifying the public bytes again. Already-live identical files do not trigger builds. This uses the existing Contents permission; no additional token permissions are needed.
+
+Transient publication failures automatically retry after a two-minute cooldown, up to three total attempts. Fresh queued approvals take priority, and superseded jobs, deleted groups, permission errors and capacity errors are not automatically retried. Approval records remain intact. After the retry budget is exhausted, investigate `/publish status` and use `/publish retry` for a new attempt.
+
 ## Group management (6 October 2026)
 
 Each Discord user may represent only one group, including admins acting as representatives. Administrative access still lets admins manage all groups. Registration repeats return the existing group, and a VRChat group ID cannot be registered twice. `/group rename group:<number> name:<actual group name>` changes a represented group; `/group delete group:<number> confirm:true` removes it from the catalog and releases its Discord assignments. Admins may also use these controls. Linking is available to standard groups for identity configuration; the in-world Join Group button remains Premium-only.

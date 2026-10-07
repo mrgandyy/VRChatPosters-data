@@ -61,10 +61,10 @@ async function githubGetSha(config: PublishConfig, path: string): Promise<string
   return json.sha;
 }
 
-export async function githubPut(config: PublishConfig, path: string, bytes: Buffer, message: string): Promise<void> {
+export async function githubPut(config: PublishConfig, path: string, bytes: Buffer, message: string): Promise<boolean> {
   const existing = await githubGetSha(config,path);
   const blobSha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
-  if (existing === blobSha) return; // Retrying identical bytes must not trigger another Pages build.
+  if (existing === blobSha) return false;
   const endpoint = `https://api.github.com/repos/${config.owner}/${config.repository}/contents/${path}`;
   const response = await fetch(endpoint, { method: 'PUT', headers: {
     Authorization: `Bearer ${config.token}`, Accept: 'application/vnd.github+json',
@@ -72,15 +72,36 @@ export async function githubPut(config: PublishConfig, path: string, bytes: Buff
   }, body: JSON.stringify({ message, content: bytes.toString('base64'), branch: config.branch,
     ...(existing ? { sha: existing } : {}) }), signal: AbortSignal.timeout(90_000) });
   if (!response.ok) throw new Error(`GitHub upload failed: HTTP ${response.status}: ${(await response.text()).slice(0,300)}`);
+  return true;
+}
+
+async function publicMatches(url: string, expectedSha: string): Promise<boolean> {
+  try {
+    const verificationUrl = new URL(url); verificationUrl.searchParams.set('release',expectedSha);
+    const response = await fetch(verificationUrl, { cache: 'no-store', signal: AbortSignal.timeout(20_000) });
+    return response.ok && sha(Buffer.from(await response.arrayBuffer())) === expectedSha;
+  } catch { return false; }
+}
+
+// A committed file is not necessarily deployed: a Pages 5xx can leave it absent
+// indefinitely. A hidden marker triggers a fresh build with Contents permission,
+// without overwriting artwork or requiring broader Actions credentials.
+export async function publishFile(config: PublishConfig, path: string, bytes: Buffer, message: string): Promise<void> {
+  const changed = await githubPut(config,path,bytes,message);
+  const url = `${config.publicBase!.replace(/\/$/,'')}/${path}`;
+  const expected = sha(bytes);
+  if (!changed) {
+    if (await publicMatches(url,expected)) return;
+    await githubPut(config,'.pages-recovery.json',Buffer.from(JSON.stringify({
+      path, sha256: expected, requestedAt: new Date().toISOString()
+    })),`Retry Pages publication for ${path}`);
+  }
+  await verifyPublic(url,expected);
 }
 
 async function verifyPublic(url: string, expectedSha: string, attempts = 90): Promise<void> {
   for (let n = 0; n < attempts; n++) {
-    try {
-      const verificationUrl = new URL(url); verificationUrl.searchParams.set('release',expectedSha);
-      const response = await fetch(verificationUrl, { cache: 'no-store', signal: AbortSignal.timeout(20_000) });
-      if (response.ok && sha(Buffer.from(await response.arrayBuffer())) === expectedSha) return;
-    } catch { /* bounded retry; old catalog remains active */ }
+    if (await publicMatches(url,expectedSha)) return;
     await new Promise(resolve => setTimeout(resolve, 10_000));
   }
   throw new Error(`Public asset did not match the release hash: ${url}`);
@@ -118,22 +139,18 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   if (!config.token || !config.owner || !config.repository)
     throw new Error('GitHub credentials and repository settings are required.');
   if (!sameArtwork) {
-    await githubPut(config,relative,atlas.bytes,`Publish Wreckshop group ${groupId} atlas r${revision}`);
-    await verifyPublic(url,atlas.sha256);
+    await publishFile(config,relative,atlas.bytes,`Publish Wreckshop group ${groupId} atlas r${revision}`);
   }
   if(banner && liveBillboard(store,groupId)?.sha256 !== banner.release.sha256){
-    await githubPut(config,banner.release.path,banner.bytes,`Publish Wreckshop group ${groupId} billboard`);
-    await verifyPublic(`${publicBase}/${banner.release.path}`,banner.release.sha256);
+    await publishFile(config,banner.release.path,banner.bytes,`Publish Wreckshop group ${groupId} billboard`);
   }
   if(backdrop && liveBackdrop(store,groupId)?.sha256 !== backdrop.release.sha256){
-    await githubPut(config,backdrop.release.path,backdrop.bytes,`Publish FBT Social group ${groupId} photo backdrop`);
-    await verifyPublic(`${publicBase}/${backdrop.release.path}`,backdrop.release.sha256);
+    await publishFile(config,backdrop.release.path,backdrop.bytes,`Publish FBT Social group ${groupId} photo backdrop`);
   }
   const catalogPath = 'catalog.json';
-  await githubPut(config,catalogPath,nextCatalog,`Activate Wreckshop group ${groupId} r${revision}`);
   // Assets were verified before activation. A slow CDN is not a failed write:
   // rolling back here creates another build and repeatedly cancels deployment.
-  await verifyPublic(`${publicBase}/${catalogPath}`,sha(nextCatalog));
+  await publishFile(config,catalogPath,nextCatalog,`Activate Wreckshop group ${groupId} r${revision}`);
   if(banner)store.setSetting(`billboard-live-${groupId}`,JSON.stringify(banner.release));
   if(backdrop)store.setSetting(`backdrop-live-${groupId}`,JSON.stringify(backdrop.release));
   if (!sameArtwork) store.recordRelease(groupId,revision,index,atlas.sha256,url);
