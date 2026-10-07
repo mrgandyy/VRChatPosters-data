@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Store } from './db.js';
-import { SLOT_COUNT } from './types.js';
+import { SLOT_COUNT, maxSlots } from './types.js';
 
 export const ATLAS_SIZE = 2048;
 export const CELL_SIZE = 512;
@@ -72,16 +72,17 @@ async function cell(bytes: Buffer): Promise<Buffer> {
     left: GUTTER, right: GUTTER, extendWith: 'copy' }).png().toBuffer();
 }
 
-export async function buildAtlas(store: Store, groupId: number, defaultsDir: string): Promise<AtlasResult> {
+export async function buildAtlas(store: Store, groupId: number, defaultsDir: string, sheet: 0 | 1 = 0): Promise<AtlasResult> {
   const group = store.group(groupId);
   if (!group) throw new Error('Group not found.');
   const defaults = await defaultFiles(defaultsDir);
   const assigned = store.assigned(groupId);
   const parts: { input: Buffer; left: number; top: number }[] = [];
   const contentHash = createHash('sha256');
-  for (let i = 0; i < SLOT_COUNT; i++) {
-    const chosen = i < (group.tier === 'premium' ? 16 : 8) ? assigned.get(i + 1)?.sourcePath : undefined;
-    const source = await readFile(chosen ?? defaults[i]!);
+  for (let i = 0; i < 16; i++) {
+    const slot = sheet * 16 + i + 1;
+    const chosen = slot <= maxSlots(group.tier) ? assigned.get(slot)?.sourcePath : undefined;
+    const source = await readFile(chosen ?? defaults[slot - 1]!);
     contentHash.update(source);
     parts.push({ input: await cell(source), left: (i % 4) * CELL_SIZE,
       top: Math.floor(i / 4) * CELL_SIZE });

@@ -29,14 +29,14 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS submissions (
         id INTEGER PRIMARY KEY, group_id INTEGER NOT NULL REFERENCES groups(id),
-        slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 16), submitter_id TEXT NOT NULL,
+        slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 32), submitter_id TEXT NOT NULL,
         source_path TEXT NOT NULL, preview_path TEXT NOT NULL,
         status TEXT NOT NULL, previous_id INTEGER REFERENCES submissions(id),
         reviewed_by TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE IF NOT EXISTS assignments (
-        group_id INTEGER NOT NULL REFERENCES groups(id), slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 16),
+        group_id INTEGER NOT NULL REFERENCES groups(id), slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 32),
         submission_id INTEGER NOT NULL REFERENCES submissions(id), PRIMARY KEY(group_id,slot)
       );
       CREATE TABLE IF NOT EXISTS jobs (
@@ -54,6 +54,7 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
+    this.migratePosterCapacity(path);
     initializeBillboards(this);
     initializeBackdrops(this);
     const columns = this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[];
@@ -71,6 +72,27 @@ export class Store {
     this.cleanupDuplicates();
   }
 
+  private migratePosterCapacity(path: string): void {
+    const tables = this.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='table' AND name IN ('submissions','assignments')")
+      .all() as {name:string;sql:string}[];
+    const old = tables.filter(t => /slot BETWEEN 1 AND 16/i.test(t.sql));
+    if (!old.length) return;
+    if (path !== ':memory:') this.db.prepare('VACUUM INTO ?').run(`${path}.before-32-posters-${Date.now()}.sqlite`);
+    this.db.pragma('foreign_keys = OFF');
+    try {
+      this.db.transaction(() => {
+        for (const table of old) {
+          const extras = this.db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL").all(table.name) as {sql:string}[];
+          const create = table.sql.replace(new RegExp(`CREATE TABLE ["\x60]?${table.name}["\x60]?`, 'i'), `CREATE TABLE ${table.name}_32`)
+            .replace(/slot BETWEEN 1 AND 16/gi, 'slot BETWEEN 1 AND 32');
+          this.db.exec(create);
+          this.db.exec(`INSERT INTO ${table.name}_32 SELECT * FROM ${table.name}; DROP TABLE ${table.name}; ALTER TABLE ${table.name}_32 RENAME TO ${table.name};`);
+          for (const extra of extras) this.db.exec(extra.sql);
+        }
+        if ((this.db.pragma('foreign_key_check') as unknown[]).length) throw new Error('Poster migration failed foreign key validation.');
+      })();
+    } finally { this.db.pragma('foreign_keys = ON'); }
+  }
   close(): void { this.db.close(); }
   setting(key: string): string | undefined {
     return (this.db.prepare('SELECT value FROM settings WHERE key=?').get(key) as { value: string } | undefined)?.value;

@@ -277,7 +277,7 @@ async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: Text
   let message;
   if (oldPanel) message = await submissionChannel.messages.fetch(oldPanel).catch(() => undefined);
   const panel = {
-    content: '**Wreckshop Worlds**\nby TwerkTaco & Resolve\nSubmit free group posters below.',
+    content: '**Wreckshop Worlds**\nby TwerkTaco & Resolve\nSubmit group posters below. Standard: 8 slots; Premium: 32 slots. Portrait 2:3 artwork recommended. Use /ws-help for sizes and upload guidance.',
     components: [panelRow()],
     embeds: [{ color: 0xff0099, thumbnail: { url: 'attachment://wreckshoplogo.png' } }],
     files: [new AttachmentBuilder(resolve('branding/wreckshoplogo.png'))]
@@ -450,7 +450,7 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
   if (!acceptsButtonPrefix(prefix)) return;
   if (action === 'help' || action === 'submit') {
     await i.reply({ content: action === 'submit' ? 'Use `/poster submit` for one image or `/poster batch` for up to eight. Choose a group and slot for each image. Register your group with `/group register`; you become its representative.' :
-      'Wreckshop Worlds: standard groups may use slots 1–8; admin assigned premium groups may use 1–16. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
+      'Wreckshop Worlds: standard groups may use slots 1–8; admin assigned premium groups may use 1–32. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
     return;
   }
   if (action === 'groups' || action === 'mine') {
@@ -492,7 +492,7 @@ client.on('interactionCreate', async interaction => {
     else if (interaction.commandName === 'group') await handleGroup(interaction);
     else if (interaction.commandName === 'publish') await handlePublish(interaction);
     else if (interaction.commandName === 'ws-help') await interaction.reply({ content:
-      'Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
+      'Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Standard: slots 1–8; Premium: slots 1–32. For slot 17 onward, use the same /poster submit command. Repeat batches as needed. Posters: portrait 2:3, recommended 1024 x 1536. Billboard: 2048 x 512. Photo backdrop: 2048 x 1536. Static PNG/JPEG/WebP, up to 12 MB and 30 MP, dimensions 256–8192 px. Slots 17–32 require the updated world. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {

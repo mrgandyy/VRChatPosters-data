@@ -1,0 +1,25 @@
+WRECKSHOP WORLDS — ARTWORK GUIDE
+
+POSTERS
+Standard: slots 1–8. Premium: slots 1–32.
+Create portrait artwork at 2:3, recommended 1024 x 1536 pixels.
+Keep important lettering inside a 5% safe margin. Use bold readable type; small text loses clarity in-world. Upload individual posters, not an atlas. Other aspect ratios are fitted with padding, not cropped. Do not pre-stretch images.
+
+UPLOAD
+Use /group mine to find your group ID.
+/poster submit group:<ID> slot:17 image:<file>
+Premium groups can use slot numbers through 32 with the same command.
+/poster batch accepts up to eight images, each with its own slot. Repeat for additional slots. Eight per batch is not your total allowance.
+Each submission goes through review. Approval enters the publishing queue; it does not appear instantly in every client. Select your group's code in the updated world to see its artwork.
+Use /poster list to check submissions. /poster remove restores the default for a slot after publication.
+
+PREMIUM EXTRAS
+Entrance billboard: 4:1, ideally 2048 x 512; /billboard submit.
+Photo-wall backdrop: 4:3, ideally 2048 x 1536; /backdrop submit.
+Set your official VRChat group page with /group page for the entrance join link.
+
+FILES
+Static PNG, JPEG or WebP. Maximum 12 MB and 30 megapixels. Both dimensions at least 256 and no greater than 8192 pixels. No animated images. Export RGB artwork with a deliberate background. Use artwork you are authorized to share and follow the server and VRChat rules.
+
+COMPATIBILITY
+Slots 17–32 require the updated world with the second poster sheet. Existing slots 1–16 remain compatible with older worlds. Group codes select artwork; they do not grant staff, dancer or VIP permissions.

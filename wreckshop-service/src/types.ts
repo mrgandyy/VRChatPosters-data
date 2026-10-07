@@ -24,8 +24,8 @@ export interface Submission {
   reviewedBy: string | null;
   createdAt: string;
 }
-export const SLOT_COUNT = 16;
-export const maxSlots = (tier: Tier) => tier === 'premium' ? 16 : 8;
+export const SLOT_COUNT = 32;
+export const maxSlots = (tier: Tier) => tier === 'premium' ? 32 : 8;
 export function assertSlot(tier: Tier, slot: number): void {
   if (!Number.isInteger(slot) || slot < 1 || slot > maxSlots(tier)) {
     throw new Error(`${tier} groups may assign slots 1–${maxSlots(tier)}.`);

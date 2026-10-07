@@ -19,7 +19,11 @@ export interface PublishConfig {
   dataDir: string;
   dryRun: boolean;
 }
-export interface ReleaseRef { groupId: number; revision: number; poolIndex: number; sha256: string; publicUrl: string }
+export interface ReleaseRef { groupId: number; revision: number; poolIndex: number; sha256: string; publicUrl: string; sha256B?: string; publicUrlB?: string }
+export function sheetBRelease(store: Store, groupId: number, revision: number): {sha256B:string;publicUrlB:string} | undefined {
+  const value = store.setting(`poster-sheet-b-${groupId}-${revision}`);
+  return value ? JSON.parse(value) as {sha256B:string;publicUrlB:string} : undefined;
+}
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
 function atlasPath(group: Group, revision: number): string {
@@ -40,6 +44,7 @@ export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacemen
       representatives: [],
       enabled: !!group.enabled, vrchatGroupUrl: group.tier === 'premium' ? group.vrchatUrl : null,
       atlasPoolIndex: active?.poolIndex ?? -1, revision: active?.revision ?? 0,
+      atlasBPoolIndex: active && ((replacement?.groupId === group.id && replacement.sha256B) || sheetBRelease(store,group.id,active.revision)) ? active.poolIndex : -1,
       billboardPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && bannerReplacement ? bannerReplacement : liveBillboard(store,group.id))?.poolIndex ?? -1) : -1,
       backdropPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && backdropReplacement ? backdropReplacement : liveBackdrop(store,group.id))?.poolIndex ?? -1) : -1,
       atlasSha256: active?.sha256 ?? ''
@@ -111,18 +116,21 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   const group = store.group(groupId);
   if (!group) throw new Error('Group missing.');
   const atlas = await buildAtlas(store, groupId, config.defaultsDir);
+  const atlasB = await buildAtlas(store, groupId, config.defaultsDir, 1);
   const previous = store.activeRelease(groupId);
-  const sameArtwork = previous?.sha256 === atlas.sha256;
+  const sameArtwork = previous?.sha256 === atlas.sha256 && sheetBRelease(store,groupId,previous.revision)?.sha256B === atlasB.sha256;
   const revision = sameArtwork ? previous!.revision :
     ((store.db.prepare('SELECT COALESCE(MAX(revision),0) AS n FROM releases WHERE group_id=?')
       .get(groupId) as { n: number }).n + 1);
   const index = sameArtwork ? previous!.poolIndex : poolIndex(group,revision);
   const relative = atlasPath(group,revision);
+  const relativeB = relative.replace(/\.png$/, '-b.png');
   const publicBase = config.publicBase?.replace(/\/$/, '');
   if (!publicBase) throw new Error('GITHUB_PUBLIC_BASE is required.');
   const url = `${publicBase}/${relative}`;
   const candidate: ReleaseRef = { groupId, revision, poolIndex: index,
-    sha256: atlas.sha256, publicUrl: sameArtwork ? previous!.publicUrl : url };
+    sha256: atlas.sha256, publicUrl: sameArtwork ? previous!.publicUrl : url,
+    sha256B: atlasB.sha256, publicUrlB: `${publicBase}/${relativeB}` };
   const banner = await prepareBillboard(store,groupId);
   const backdrop = await prepareBackdrop(store,groupId);
   const nextCatalog = catalog(store,candidate,banner?.release,backdrop?.release);
@@ -131,6 +139,7 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
     const out = join(config.dataDir,'dry-run');
     await mkdir(out,{recursive:true});
     await writeFile(join(out,`group-${groupId}-atlas.png`),atlas.bytes);
+    await writeFile(join(out,`group-${groupId}-atlas-b.png`),atlasB.bytes);
     if(banner)await writeFile(join(out,`group-${groupId}-billboard.png`),banner.bytes);
     if(backdrop)await writeFile(join(out,`group-${groupId}-backdrop.png`),backdrop.bytes);
     await writeFile(join(out,'catalog.json'),nextCatalog);
@@ -140,6 +149,7 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
     throw new Error('GitHub credentials and repository settings are required.');
   if (!sameArtwork) {
     await publishFile(config,relative,atlas.bytes,`Publish Wreckshop group ${groupId} atlas r${revision}`);
+    await publishFile(config,relativeB,atlasB.bytes,`Publish Wreckshop group ${groupId} second atlas r${revision}`);
   }
   if(banner && liveBillboard(store,groupId)?.sha256 !== banner.release.sha256){
     await publishFile(config,banner.release.path,banner.bytes,`Publish Wreckshop group ${groupId} billboard`);
@@ -153,7 +163,10 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   await publishFile(config,catalogPath,nextCatalog,`Activate Wreckshop group ${groupId} r${revision}`);
   if(banner)store.setSetting(`billboard-live-${groupId}`,JSON.stringify(banner.release));
   if(backdrop)store.setSetting(`backdrop-live-${groupId}`,JSON.stringify(backdrop.release));
-  if (!sameArtwork) store.recordRelease(groupId,revision,index,atlas.sha256,url);
+  store.db.transaction(() => {
+    if (!sameArtwork) store.recordRelease(groupId,revision,index,atlas.sha256,url);
+    store.setSetting(`poster-sheet-b-${groupId}-${revision}`,JSON.stringify({sha256B:atlasB.sha256,publicUrlB:candidate.publicUrlB}));
+  })();
   store.db.prepare(`UPDATE submissions SET status='live',updated_at=CURRENT_TIMESTAMP
     WHERE id IN (SELECT submission_id FROM assignments WHERE group_id=?)`).run(groupId);
   return `live: group ${groupId}, revision ${revision}, pool ${index}`;
@@ -184,6 +197,8 @@ export async function activateRollback(store: Store, groupId: number, revision: 
   if (!config.token || !config.owner || !config.repository || !config.publicBase)
     throw new Error('GitHub publishing settings are required.');
   await verifyPublic(target.publicUrl,target.sha256);
+  const sheetB = sheetBRelease(store,groupId,revision);
+  if (sheetB) await verifyPublic(sheetB.publicUrlB,sheetB.sha256B);
   const old = catalog(store);
   const next = catalog(store,{groupId,revision,poolIndex:target.poolIndex,
     sha256:target.sha256,publicUrl:target.publicUrl});

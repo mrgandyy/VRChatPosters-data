@@ -16,7 +16,7 @@ The owner selected manual group names instead of authenticated VRChat name looku
 
 The dancer whitelist and dancer self-claim feature were deferred by the owner and are not included in this change.
 
-One Discord bot process holds the SQLite database and publishes 2048 × 2048 poster atlases. The bot is for Wreckshop Worlds by TwerkTaco & Resolve; SHXTTY is one possible premium partner. Standard groups can replace slots 1–8, premium groups 1–16. Unassigned slots use the 16 bundled default artworks. Codes are public preset selectors and never confer in-world roles.
+One Discord bot process holds the SQLite database and publishes 2048 × 2048 poster atlases. The bot is for Wreckshop Worlds by TwerkTaco & Resolve; SHXTTY is one possible premium partner. Standard groups can replace slots 1–8, premium groups 1–32. Unassigned slots use the 32 bundled default artworks. Slots 17–32 use a second atlas and require the updated world. See ARTWORK_GUIDE.txt for submission sizes and commands. Codes are public preset selectors and never confer in-world roles.
 
 ## Local dry run
 
