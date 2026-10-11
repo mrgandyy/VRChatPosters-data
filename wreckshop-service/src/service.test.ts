@@ -20,7 +20,8 @@ test('slot caps, group isolation, stale approval, and rejection preserve approve
   try {
     const standard = f.store.registerGroup('Standard');
     const premium = f.store.registerGroup('Premium','premium');
-    assert.throws(() => f.store.submit(standard.id,9,'user','a','b'));
+    assert.doesNotThrow(() => f.store.submit(standard.id,11,'user','a','b'), 'standard: entrance + arrival hall = posters 1–11');
+    assert.throws(() => f.store.submit(standard.id,12,'user','a','b'), 'poster 12 is the club floor: premium only');
     assert.doesNotThrow(() => f.store.submit(premium.id,16,'user','a','b'));
     const first = f.store.submit(standard.id,1,'user','first','preview');
     f.store.decide(first.id,'reviewer',true);

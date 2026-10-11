@@ -4,6 +4,7 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Store } from './db.js';
 import { SLOT_COUNT, maxSlots } from './types.js';
+import { slotOfCell } from './slots.js';
 
 export const ATLAS_SIZE = 2048;
 export const CELL_SIZE = 512;
@@ -80,9 +81,11 @@ export async function buildAtlas(store: Store, groupId: number, defaultsDir: str
   const parts: { input: Buffer; left: number; top: number }[] = [];
   const contentHash = createHash('sha256');
   for (let i = 0; i < 16; i++) {
-    const slot = sheet * 16 + i + 1;
+    // Cells are physical positions in the world; poster numbers are what people pick.
+    const atlasCell = sheet * 16 + i + 1;
+    const slot = slotOfCell(atlasCell);
     const chosen = slot <= maxSlots(group.tier) ? assigned.get(slot)?.sourcePath : undefined;
-    const source = await readFile(chosen ?? defaults[slot - 1]!);
+    const source = await readFile(chosen ?? defaults[atlasCell - 1]!);
     contentHash.update(source);
     parts.push({ input: await cell(source), left: (i % 4) * CELL_SIZE,
       top: Math.floor(i / 4) * CELL_SIZE });

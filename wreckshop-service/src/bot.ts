@@ -15,6 +15,7 @@ import { activateRollback, processOneJob, type PublishConfig } from './publish.j
 import { assertSlot, type Group } from './types.js';
 import { acceptsButtonPrefix, databasePath, legacyName, rebrand } from './branding.js';
 import { URL_POOL_CAPACITY } from './url-pool.js';
+import { posterMap, slotInfo } from './slots.js';
 
 const token = process.env.DISCORD_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID;
@@ -38,15 +39,15 @@ const ephemeral = MessageFlags.Ephemeral;
 const poster = new SlashCommandBuilder().setName('poster').setDescription('Wreckshop posters')
   .addSubcommand(s => s.setName('submit').setDescription('Submit a poster for review')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
-    .addIntegerOption(o => o.setName('slot').setDescription('Poster slot').setRequired(true))
+    .addIntegerOption(o => o.setName('slot').setDescription('Poster number: 1–11 entrance & arrival (everyone), 12–32 club (Premium)').setMinValue(1).setMaxValue(32).setRequired(true))
     .addAttachmentOption(o => o.setName('image').setDescription('Static PNG, JPEG, or WebP').setRequired(true)))
   .addSubcommand(s => {
     s.setName('batch').setDescription('Submit up to eight posters for review at once')
       .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
-      .addIntegerOption(o => o.setName('slot1').setDescription('First poster slot').setRequired(true))
+      .addIntegerOption(o => o.setName('slot1').setDescription('First poster number (see /poster map)').setMinValue(1).setMaxValue(32).setRequired(true))
       .addAttachmentOption(o => o.setName('image1').setDescription('First poster image').setRequired(true));
     for (let n = 2; n <= 8; n++) {
-      s.addIntegerOption(o => o.setName(`slot${n}`).setDescription(`Poster ${n} slot`));
+      s.addIntegerOption(o => o.setName(`slot${n}`).setDescription(`Poster ${n} number`).setMinValue(1).setMaxValue(32));
       s.addAttachmentOption(o => o.setName(`image${n}`).setDescription(`Poster ${n} image`));
     }
     return s;
@@ -55,7 +56,8 @@ const poster = new SlashCommandBuilder().setName('poster').setDescription('Wreck
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true)))
   .addSubcommand(s => s.setName('remove').setDescription('Restore default artwork in a slot')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
-    .addIntegerOption(o => o.setName('slot').setDescription('Poster slot').setRequired(true)));
+    .addIntegerOption(o => o.setName('slot').setDescription('Poster number').setMinValue(1).setMaxValue(32).setRequired(true)))
+  .addSubcommand(s => s.setName('map').setDescription('Where every poster number is in the club, and which tier gets it'));
 const billboard = new SlashCommandBuilder().setName('billboard').setDescription('Premium entrance billboard')
   .addSubcommand(s=>s.setName('submit').setDescription('Upload a wide 4:1 billboard for review')
     .addIntegerOption(o=>o.setName('group').setDescription('Premium group ID').setRequired(true))
@@ -281,7 +283,7 @@ async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: Text
   let message;
   if (oldPanel) message = await submissionChannel.messages.fetch(oldPanel).catch(() => undefined);
   const panel = {
-    content: '**Wreckshop Worlds**\nby TwerkTaco & Resolve\nSubmit group posters below. Standard: 8 slots; Premium: 32 slots. Portrait 2:3 artwork recommended. Use /ws-help for sizes and upload guidance.',
+    content: '**Wreckshop Worlds**\nby TwerkTaco & Resolve\nSubmit group posters below. Every group: posters 1–11 (entrance and arrival hall). Premium: all 32. \`/poster map\` shows where each one is. Portrait 2:3 artwork recommended. Use /ws-help for sizes and upload guidance.',
     components: [panelRow()],
     embeds: [{ color: 0xff0099, thumbnail: { url: 'attachment://wreckshoplogo.png' } }],
     files: [new AttachmentBuilder(resolve('branding/wreckshoplogo.png'))]
@@ -295,12 +297,13 @@ async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: Text
 }
 async function handlePoster(i: ChatInputCommandInteraction): Promise<void> {
   const sub = i.options.getSubcommand();
+  if (sub === 'map') { await i.reply({ content: posterMap(), flags: ephemeral }); return; }
   const groupId = i.options.getInteger('group',true);
   const group = requiredGroup(groupId);
   if (sub === 'list') {
     if (!canManage(i,groupId)) throw new Error('You do not represent this group.');
     const list = store.submissions(groupId).slice(0,20);
-    await i.reply({ content: list.length ? list.map(s => `#${s.id} · slot ${s.slot} · ${s.status}`).join('\n') : 'No submissions yet.', flags: ephemeral });
+    await i.reply({ content: list.length ? list.map(s => `#${s.id} · poster ${s.slot} (${slotInfo(s.slot)?.where ?? '?'}) · ${s.status}`).join('\n') : 'No submissions yet.', flags: ephemeral });
     return;
   }
   if (!canManage(i,groupId)) throw new Error('You do not represent this group.');
@@ -463,7 +466,7 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
   if (!acceptsButtonPrefix(prefix)) return;
   if (action === 'help' || action === 'submit') {
     await i.reply({ content: action === 'submit' ? 'Use `/poster submit` for one image or `/poster batch` for up to eight. Choose a group and slot for each image. Register your group with `/group register`; you become its representative.' :
-      'Wreckshop Worlds: standard groups may use slots 1–8; admin assigned premium groups may use 1–32. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
+      'Wreckshop Worlds: every group may use posters 1–11 (entrance and arrival hall); Premium and Headliner groups may use 1–32. `/poster map` shows where each number is. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
     return;
   }
   if (action === 'groups' || action === 'mine') {
@@ -518,7 +521,7 @@ client.on('interactionCreate', async interaction => {
     else if (interaction.commandName === 'group') { await handleGroup(interaction); fbt.scheduleSync(); }
     else if (interaction.commandName === 'publish') await handlePublish(interaction);
     else if (interaction.commandName === 'ws-help') await interaction.reply({ content:
-      'New here? Run `/start` for the step-by-step: register, get verified, host a night, collab, and apply for Premium or Headliner. Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Standard: slots 1–8; Premium: slots 1–32. For slot 17 onward, use the same /poster submit command. Repeat batches as needed. Posters: portrait 2:3, recommended 1024 x 1536. Billboard: 2048 x 512. Photo backdrop: 2048 x 1536. Static PNG/JPEG/WebP, up to 12 MB and 30 MP, dimensions 256–8192 px. Slots 17–32 require the updated world. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
+      'New here? Run `/start` for the step-by-step: register, get verified, host a night, collab, and apply for Premium or Headliner. Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Posters are numbered in walking order: 1–6 entrance and sidewalk, 7–11 arrival hall (every group), 12–16 lower club and 17–32 upper club (Premium). `/poster map` lists every spot. Repeat batches as needed. Posters: portrait 2:3, recommended 1024 x 1536. Billboard: 2048 x 512. Photo backdrop: 2048 x 1536. Static PNG/JPEG/WebP, up to 12 MB and 30 MP, dimensions 256–8192 px. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {

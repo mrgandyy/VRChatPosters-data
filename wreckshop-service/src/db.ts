@@ -7,6 +7,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { assertSlot, type Group, type Submission, type Tier } from './types.js';
 import { LEGACY_BRAND } from './branding.js';
+import { POSTER_NUMBERING, STANDARD_SLOTS, slotOfCell } from './slots.js';
 import { initializeUrlPool } from './url-pool.js';
 
 export class Store {
@@ -59,6 +60,7 @@ export class Store {
     if (!(this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[]).some(c => c.name === 'level'))
       this.db.exec('ALTER TABLE groups ADD COLUMN level TEXT');
     this.migratePosterCapacity(path);
+    this.migratePosterNumbering(path);
     initializeBillboards(this);
     initializeBackdrops(this);
     const columns = this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[];
@@ -98,6 +100,43 @@ export class Store {
         if ((this.db.pragma('foreign_key_check') as unknown[]).length) throw new Error('Poster migration failed foreign key validation.');
       })();
     } finally { this.db.pragma('foreign_keys = ON'); }
+  }
+  /**
+   * Numbering scheme 2 (walking order). Stored numbers used to be atlas cells. Premium groups keep
+   * every poster where it physically is (cell → its new number). Standard groups keep their numbers
+   * 1–8, which now name entrance and arrival-hall spots, so nothing they uploaded is lost; their
+   * atlases are republished. Runs once, after a backup.
+   */
+  private migratePosterNumbering(path: string): void {
+    const has = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").get();
+    if (!has || Number(this.setting('poster_numbering') ?? 1) >= POSTER_NUMBERING) return;
+    const used = this.db.prepare('SELECT (SELECT COUNT(*) FROM submissions) + (SELECT COUNT(*) FROM assignments) AS n').get() as { n: number };
+    if (used.n && path !== ':memory:') this.db.prepare('VACUUM INTO ?').run(`${path}.before-poster-numbering-2-${Date.now()}.sqlite`);
+    this.db.transaction(() => {
+      const premium = (this.db.prepare("SELECT id FROM groups WHERE tier='premium'").all() as { id: number }[]).map(r => r.id);
+      const remap = (table: 'submissions' | 'assignments') => {
+        // Two passes through negative numbers so the (group_id, slot) key never collides midway.
+        const rows = this.db.prepare(`SELECT rowid AS r, group_id AS g, slot FROM ${table}`).all() as { r: number; g: number; slot: number }[];
+        const move = this.db.prepare(`UPDATE ${table} SET slot=? WHERE rowid=?`);
+        const target = (g: number, slot: number) => premium.includes(g) ? slotOfCell(slot) : slot;
+        if (table === 'assignments') {
+          this.db.exec('CREATE TEMP TABLE IF NOT EXISTS _a AS SELECT * FROM assignments WHERE 0');
+          this.db.exec('DELETE FROM _a; INSERT INTO _a SELECT * FROM assignments; DELETE FROM assignments;');
+          const put = this.db.prepare('INSERT INTO assignments(group_id,slot,submission_id) VALUES(?,?,?)');
+          for (const a of this.db.prepare('SELECT group_id AS g, slot, submission_id AS s FROM _a').all() as { g: number; slot: number; s: number }[])
+            put.run(a.g, target(a.g, a.slot), a.s);
+          this.db.exec('DROP TABLE _a');
+          return;
+        }
+        for (const row of rows) move.run(target(row.g, row.slot), row.r);
+      };
+      remap('submissions');
+      remap('assignments');
+      // Standard groups' posters moved to new spots in the world, so their sheets rebuild.
+      const standard = this.db.prepare("SELECT DISTINCT a.group_id AS g FROM assignments a JOIN groups g ON g.id=a.group_id WHERE g.tier='standard'").all() as { g: number }[];
+      for (const { g } of standard) this.queuePublish(g);
+      this.setSetting('poster_numbering', String(POSTER_NUMBERING));
+    })();
   }
   close(): void { this.db.close(); }
   setting(key: string): string | undefined {
@@ -205,7 +244,7 @@ export class Store {
       this.db.prepare('UPDATE groups SET tier=? WHERE id=?').run(tier, groupId);
       if (tier === 'standard') {
         this.db.prepare('UPDATE groups SET level=NULL WHERE id=?').run(groupId);
-        this.db.prepare('DELETE FROM assignments WHERE group_id=? AND slot>8').run(groupId);
+        this.db.prepare('DELETE FROM assignments WHERE group_id=? AND slot>?').run(groupId, STANDARD_SLOTS);
       }
       this.queuePublish(groupId);
     })();

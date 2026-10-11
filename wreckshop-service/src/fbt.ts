@@ -280,7 +280,7 @@ export function createFbt(d: FbtDeps) {
           [linkRow(['Collabs', url('/collabs')])]);
         return true;
       case 'posters':
-        await say(i, 'Every registered group can put up to 8 posters in the club; Premium gets 32, plus an entrance billboard and a photo-wall backdrop. Use `/poster submit` (one image) or `/poster batch` (up to eight). Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. Staff review everything before it goes live. `/ws-help` has the details.');
+        await say(i, 'Every registered group gets posters 1–11, at the entrance and in the arrival hall; Premium gets all 32 (the whole club), plus an entrance billboard and a photo-wall backdrop. Use `/poster submit` (one image) or `/poster batch` (up to eight); `/poster map` shows where each number is. Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. Staff review everything before it goes live. `/ws-help` has the details.');
         return true;
       case 'cy': case 'cn': {
         await i.deferUpdate();
