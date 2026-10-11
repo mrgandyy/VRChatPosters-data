@@ -809,6 +809,15 @@ export function createFbt(d: FbtDeps) {
         scheduleSync();
         return;
       }
+      case 'team.joined': {
+        // Someone accepted a club's invite link on the website (the bot added them as a rep just before).
+        const groupId = Number(p.groupId);
+        await d.auditLog(guild, `👥 <@${p.user}> joined ${p.groupName} (#${groupId})'s team as a manager (invited by <@${p.by}>).`);
+        await dm(String(p.by), `👥 **${String(p.userName ?? 'Someone')}** accepted your invite and now helps run **${p.groupName}** on FBT Social. You can manage your team on My dashboard: ${url('/me')}`);
+        await dm(String(p.user), `Welcome to the team for **${p.groupName}**! Run the club from **My dashboard** at ${url('/me')}: customize its look, post nights and book collabs.`);
+        scheduleSync(0);
+        return;
+      }
       case 'discord.channel.delete': {
         if (!guild) throw new Error('The server isn\'t available right now.');
         const line = await deleteChannel(guild, store, String(p.channelId), String(p.name), String(p.by));
