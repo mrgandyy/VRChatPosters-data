@@ -44,3 +44,13 @@ test('announcements: @everyone only when asked; announcement channels are publis
   assert.deepEqual(log, ['send announcements  ', 'crosspost', 'send announcements @everyone everyone', 'crosspost']);
   await assert.rejects(postAnnouncement(g, { channelId: '6', title: 'x', body: 'y', everyone: false, links: [] }), /text channel/);
 });
+
+test('artwork guide fits Discord limits and says the right sizes', async () => {
+  const { artworkGuide } = await import('./fbt-discord.js');
+  const g = artworkGuide('https://fbtsocial.com/');
+  const e = g.embeds[0]!.toJSON();
+  assert.ok((e.fields ?? []).every((f) => f.value.length <= 1024 && f.name.length <= 256));
+  const text = JSON.stringify(e);
+  assert.match(text, /1024 × 1536/); assert.match(text, /2048 × 512/); assert.match(text, /\*\*1–11\*\*/);
+  assert.match(JSON.stringify(g.components[0]!.toJSON()), /https:\/\/fbtsocial.com\/me/);
+});

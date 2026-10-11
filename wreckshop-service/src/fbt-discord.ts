@@ -70,3 +70,49 @@ export async function postAnnouncement(guild: Guild, a: Announcement): Promise<s
   if (ch.type === ChannelType.GuildAnnouncement) await msg.crosspost().catch(() => undefined);
   return msg.id;
 }
+
+/** The bot-owned artwork guide (kept up to date in #artwork-guide). */
+export function artworkGuide(siteUrl: string): { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
+  const u = (p: string) => `${siteUrl.replace(/\/$/, '')}${p}`;
+  const embed = new EmbedBuilder().setColor(0xe8507a).setTitle('🎨 Artwork guide · FBT Social')
+    .setDescription('Put your club\'s art in the world and on the Strip. Staff approve every image, then it goes live with the next publish, usually a few minutes later.')
+    .addFields(
+      { name: 'Easiest: on the website', value: `Sign in at **fbtsocial.com** → **My dashboard** → **Customize**. Pick a spot on the poster map, upload, done. You\'ll see each image\'s status there and get a DM when it\'s approved.\n${u('/me')}` },
+      { name: 'Or here in Discord', value: '`/poster submit` (one image) · `/poster batch` (up to 8) · `/billboard submit` · `/backdrop submit` · or the buttons in #wreckshop-submit.' },
+      { name: 'Which posters you get', value: '**1–11** for every club: entrance, sidewalk and arrival hall.\n**12–32** for Premium and Headliner: lower and upper club.\n`/poster map` (or the map on the website) shows exactly where each number hangs.' },
+      { name: 'Sizes', value: [
+        '**Posters:** portrait 2:3, ideally **1024 × 1536**',
+        '**Billboard** (Premium): wide 4:1, **2048 × 512**',
+        '**Photo-wall backdrop** (Premium): 4:3, **2048 × 1536**',
+        '**Website only:** logo (square, 512 × 512), page banner (3:1, 1800 × 600), up to 4 gallery photos',
+        'PNG, JPG or WebP. Up to 10 MB on the website, 12 MB in Discord. At least 256 px a side.',
+      ].join('\n') },
+      { name: 'Tips', value: 'Big, bold text reads best from across the room. Keep it to your own club\'s art and follow VRChat\'s rules. Your posters show in the world whenever your group code is active at the door.' },
+    )
+    .setFooter({ text: 'Kept up to date by the FBT Social bot' });
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setLabel('My dashboard').setStyle(ButtonStyle.Link).setURL(u('/me')),
+    new ButtonBuilder().setLabel('How it works').setStyle(ButtonStyle.Link).setURL(u('/start')));
+  return { embeds: [embed], components: [row] };
+}
+
+/**
+ * Keeps one bot-owned guide message in #artwork-guide: edits it if it's there, posts it otherwise.
+ * Messages other people wrote in the channel are left alone (and listed in the log for staff).
+ */
+export async function ensureArtworkGuide(guild: Guild, store: Store, siteUrl: string): Promise<string> {
+  const ch = guild.channels.cache.find((c) => c.type === ChannelType.GuildText && c.name.toLowerCase().replace(/[^a-z0-9]/g, '') === 'artworkguide') as TextChannel | undefined;
+  if (!ch) return 'No #artwork-guide channel; skipped the artwork guide.';
+  const me = guild.members.me?.id;
+  const recent = await ch.messages.fetch({ limit: 30 }).catch(() => undefined);
+  const others = recent ? [...recent.values()].filter((m) => m.author.id !== me) : [];
+  const saved = store.setting('artwork_guide_message');
+  let msg = saved ? await ch.messages.fetch(saved).catch(() => undefined) : undefined;
+  if (!msg && recent) msg = [...recent.values()].find((m) => m.author.id === me && m.embeds[0]?.title?.startsWith('🎨 Artwork guide'));
+  const body = artworkGuide(siteUrl);
+  if (msg) await msg.edit(body);
+  else { msg = await ch.send(body); await msg.pin().catch(() => undefined); }
+  store.setSetting('artwork_guide_message', msg.id);
+  const list = others.slice(0, 8).map((m) => `    ${m.author.username} ${m.createdAt.toISOString().slice(0, 10)}: ${m.content.replace(/\s+/g, ' ').slice(0, 90) || '[embed/attachment]'}`).join('\n');
+  return `Artwork guide ready in #${ch.name}.${others.length ? ` Other messages there (left alone):\n${list}` : ''}`;
+}

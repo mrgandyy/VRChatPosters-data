@@ -15,7 +15,7 @@ import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
-import { channelInventory, deleteChannel, postAnnouncement } from './fbt-discord.js';
+import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
@@ -241,6 +241,7 @@ export function createFbt(d: FbtDeps) {
     const msg = old ? await start.messages.fetch(old).catch(() => undefined) : undefined;
     if (msg) await msg.edit(panel);
     else store.setSetting('fbt_start_panel', (await start.send(panel)).id);
+    console.log(await ensureArtworkGuide(guild, store, d.publicUrl).catch(e => `Artwork guide failed: ${e.message}`));
     scheduleSync(1000);
   }
 
