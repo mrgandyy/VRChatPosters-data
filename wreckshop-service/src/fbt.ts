@@ -11,6 +11,7 @@ import type { Store } from './db.js';
 import { normalizeGroupLink, validateGroupName } from './group-link.js';
 import { groupVerified, sitePost, siteEnabled, statusLabel, syncGroups, type OutboxFailure, type OutboxItem, type SiteConfig } from './fbt-site.js';
 import { applyAdmin, setLevel, type AdminAction } from './fbt-admin.js';
+import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import type { Group } from './types.js';
 
@@ -92,6 +93,40 @@ export function createFbt(d: FbtDeps) {
   function verifiedGroup(g: Group): boolean {
     return groupVerified(g, store.representatives(g.id), currentVerified());
   }
+  // ── Tier roles: reps wear their group's level in Discord ─────────────────────────────────
+  let rolesNote = '';
+  async function syncTierRoles(): Promise<void> {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    if (!guild) return;
+    const roles = findTierRoles([...guild.roles.cache.values()].map(r => ({ id: r.id, name: r.name })), (k) => store.setting(k));
+    const note = `Tier roles: ${(['headliner', 'premium', 'standard'] as const).map(l => `${l}=${roles[l] ? `"${guild.roles.cache.get(roles[l]!)?.name}"` : 'missing'}`).join(', ')}`;
+    if (note !== rolesNote) { rolesNote = note; console.log(note); }
+    if (!roles.headliner && !roles.premium && !roles.standard) return;
+    const verified = currentVerified();
+    const desired = new Map<string, ReturnType<typeof levelFor>>();
+    for (const g of store.groups()) {
+      if (g.id === 0 || !g.enabled) continue;
+      const reps = store.representatives(g.id);
+      const level = levelFor(g, groupVerified(g, reps, verified));
+      for (const u of reps) desired.set(u, level);
+    }
+    const changes = planRoles(desired, roles, (u) => {
+      const m = guild.members.cache.get(u);
+      return m ? new Set(m.roles.cache.keys()) : undefined;
+    });
+    let done = 0;
+    for (const c of changes.slice(0, 25)) {
+      const m = guild.members.cache.get(c.userId);
+      if (!m) continue;
+      try {
+        if (c.add.length) await m.roles.add(c.add, 'FBT Social: group tier');
+        if (c.remove.length) await m.roles.remove(c.remove, 'FBT Social: group tier changed');
+        done++;
+      } catch (e) { console.error(`Couldn't update tier roles for ${c.userId}:`, e instanceof Error ? e.message : e); }
+    }
+    if (done) console.log(`Tier roles updated for ${done} rep(s)${changes.length > 25 ? `, ${changes.length - 25} more next round` : ''}.`);
+  }
+
   /** Display names of representatives the bot can see, so the website shows names, not ids. */
   function memberNames(): Map<string, string> {
     const guild = d.client.guilds.cache.get(d.guildId);
@@ -119,6 +154,7 @@ export function createFbt(d: FbtDeps) {
     clearTimeout(syncTimer);
     syncTimer = setTimeout(async () => {
       const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined), memberNames(), currentVerified());
+      await syncTierRoles().catch((e) => console.error('Tier role sync failed:', e));
       if (!r.ok) console.error('Website group sync failed:', r.error);
     }, delayMs);
   }
