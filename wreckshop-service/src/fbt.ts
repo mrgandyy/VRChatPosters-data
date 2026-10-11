@@ -15,6 +15,7 @@ import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
+import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
 const RULES_VERSION = 'vrchat-rules-v1';
@@ -307,7 +308,8 @@ export function createFbt(d: FbtDeps) {
         textInput('about', 'Your group and your nights', TextInputStyle.Paragraph, { min: 20, max: 800, placeholder: 'What kind of nights you throw, who\'s on your team' }),
         textInput('schedule', 'How often you host', TextInputStyle.Short, { max: 200, placeholder: 'Every Friday and Saturday' }),
         textInput('crowd', 'Typical crowd', TextInputStyle.Short, { max: 100, placeholder: '30–50 people' }),
-        textInput('links', 'Links (optional)', TextInputStyle.Short, { required: false, max: 300, placeholder: 'Socials, VRChat group' }));
+        textInput('links', 'Links (optional)', TextInputStyle.Short, { required: false, max: 300, placeholder: 'Socials, VRChat group' }),
+        textInput('agree', 'Type AGREE: we run 18+ age-verified rooms', TextInputStyle.Short, { min: 5, max: 5, placeholder: 'AGREE (and we let fbtheat into our VRChat group)' }));
   }
 
   // ── Buttons ──────────────────────────────────────────────────────────────────────────────
@@ -412,13 +414,9 @@ export function createFbt(d: FbtDeps) {
     const verdict = approve ? `**APPROVED** by <@${i.user.id}>` : `**DECLINED** by <@${i.user.id}>${note ? ` · "${note}"` : ''}`;
     if (i.message) await i.message.edit({ content: `${i.message.content ?? ''}\n${verdict}`.trim(), components: [] }).catch(() => undefined);
     await d.auditLog(i.guild, `Application #${id} (${groupName}, ${level}) ${approve ? 'approved' : 'declined'} by <@${i.user.id}>.`);
-    const user = await d.client.users.fetch(applicant).catch(() => undefined);
     const label = level === 'headliner' ? 'Headliner' : 'Premium';
-    const g = store.group(groupId);
-    const dm = approve
-      ? `🎉 **${groupName} is now ${label}!** Your resort on the Strip just got its upgrade.${level === 'premium' || level === 'headliner' ? ' You can now use 32 poster slots, `/billboard submit` and `/backdrop submit`.' : ''}${g && !g.vrchatUrl ? ' Add your VRChat group with `/group link` to show the Join Group button in the world.' : ''}`
-      : `Your ${label} application for **${groupName}** wasn't approved this time.${note ? `\nStaff note: ${note}` : ''}\nYou can apply again in 14 days. Keep hosting: consistent nights count the most.`;
-    await user?.send(dm).catch(() => undefined);
+    if (approve) await sendWelcome(applicant, groupId, groupName, level);
+    else await dm(applicant, `Your ${label} application for **${groupName}** wasn't approved this time.${note ? `\nStaff note: ${note}` : ''}\nYou can apply again in 14 days. Keep hosting: consistent nights count the most.`);
   }
 
   // ── Modals ───────────────────────────────────────────────────────────────────────────────
@@ -450,11 +448,13 @@ export function createFbt(d: FbtDeps) {
     if (action === 'applym') {
       const g = groupOf(i.user.id);
       if (!g) throw new Error('You don\'t represent a group yet.');
+      if (v('agree').trim().toUpperCase() !== 'AGREE') throw new Error('Premium clubs run age-verified (18+) instances and let fbtheat into their VRChat group. Type AGREE in the last box to apply.');
       await i.deferReply({ flags: EPHEMERAL });
       scheduleSync(0);
       await new Promise(r => setTimeout(r, 1500)); // let the website see the latest verification first
       const r = await sitePost(d.site, '/api/bot/apply', {
         actor: i.user.id, group: g.id, level: arg, about: v('about'), schedule: v('schedule'), crowd: v('crowd'), links: v('links'),
+        ageAgree: v('agree').trim().toUpperCase() === 'AGREE',
       });
       await i.editReply(r.ok ? 'Application sent. Staff review it here in Discord, and I\'ll DM you the answer.' : `⚠️ ${r.error}`);
       return true;
@@ -622,6 +622,17 @@ export function createFbt(d: FbtDeps) {
       : `Your ${what} for **${g.name}** wasn't approved.${note ? `\nStaff note: ${note}` : ''}\nYou can upload a new one any time: ${url('/manage')}`);
   }
 
+  /** Congratulations + getting started, for a club approved to Premium or Headliner. */
+  async function sendWelcome(userId: string, groupId: number, groupName: string, level: string): Promise<void> {
+    const g = store.group(groupId);
+    const w = premiumWelcome(groupName, level === 'headliner' ? 'headliner' : 'premium', {
+      linked: Boolean(g?.vrchatUrl), manageUrl: url(`/manage?group=${groupId}`), hostUrl: url('/host'), pageUrl: url('/'),
+    });
+    const embed = new EmbedBuilder().setColor(level === 'headliner' ? GOLD : EMERALD).setTitle(w.title).setDescription(w.description)
+      .addFields(w.fields.map(f => ({ name: f.name, value: f.value.slice(0, 1024) }))).setFooter({ text: 'FBT Social · the after-dark Strip' });
+    await dm(userId, { embeds: [embed], components: [linkRow(['Customize My club', url(`/manage?group=${groupId}`)], ['Host a night', url('/host')], ['The Strip', url('/')])] });
+  }
+
   async function deliver(item: OutboxItem): Promise<void> {
     const p = item.payload as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
     const guild = d.client.guilds.cache.get(d.guildId) ?? null;
@@ -639,10 +650,8 @@ export function createFbt(d: FbtDeps) {
         const approvals = store.setting('approval_channel');
         const ch = approvals && guild ? guild.channels.cache.get(approvals) : undefined;
         if (ch?.type === ChannelType.GuildText) await (ch as TextChannel).send({ content: `Application #${p.applicationId} · ${p.groupName} · ${p.approve ? '**APPROVED**' : '**DECLINED**'} by <@${p.by}> on the website${!p.approve && p.note ? ` · "${p.note}"` : ''}.`, allowedMentions: { parse: [] } }).catch(() => undefined);
-        const user = await d.client.users.fetch(String(p.applicant)).catch(() => undefined);
-        await user?.send(p.approve
-          ? `🎉 **${p.groupName} is now ${label}!** Your resort on the Strip just got its upgrade. You can now use all 32 poster spots, \`/billboard submit\` and \`/backdrop submit\`.`
-          : `Your ${label} application for **${p.groupName}** wasn't approved this time.${p.note ? `\nStaff note: ${p.note}` : ''}\nYou can apply again in 14 days. Keep hosting: consistent nights count the most.`).catch(() => undefined);
+        if (p.approve) await sendWelcome(String(p.applicant), Number(p.groupId ?? store.groups().find(g => g.name === p.groupName)?.id ?? 0), String(p.groupName), String(p.level));
+        else await dm(String(p.applicant), `Your ${label} application for **${p.groupName}** wasn't approved this time.${p.note ? `\nStaff note: ${p.note}` : ''}\nYou can apply again in 14 days. Keep hosting: consistent nights count the most.`);
         return;
       }
       case 'collab.request': {
@@ -753,6 +762,22 @@ export function createFbt(d: FbtDeps) {
         await dm(String(p.uploader), p.approve
           ? `✅ Your ${what} for **${p.groupName}** was approved and is on your venue page now. ${url('/manage')}`
           : `Your ${what} for **${p.groupName}** wasn't approved.${p.note ? `\nStaff note: ${p.note}` : ''}\nYou can upload a new one any time: ${url('/manage')}`);
+        return;
+      }
+      case 'enforce.demote': {
+        const line = demoteForAge(store, Number(p.groupId));
+        if (!line) return;
+        await d.auditLog(guild, `⚖️ ${line}`);
+        for (const rep of store.representatives(Number(p.groupId))) await dm(rep, demoteDm(String(p.groupName), String(p.reason ?? 'we couldn\'t confirm your rooms were age-verified'), url('/apply')));
+        scheduleSync(0);
+        return;
+      }
+      case 'enforce.deactivate': {
+        // No message to the club (owner's call): if they're interested, they'll come back.
+        const line = deactivateForInactivity(store, Number(p.groupId));
+        if (!line) return;
+        await d.auditLog(guild, `💤 ${line}`);
+        scheduleSync(0);
         return;
       }
       case 'look.set': {
