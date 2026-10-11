@@ -11,7 +11,8 @@ import { submitBillboard, decideBillboard } from './billboard.js';
 import { join, resolve } from 'node:path';
 import { Store } from './db.js';
 import { MAX_SOURCE_BYTES, saveSource } from './atlas.js';
-import { activateRollback, processOneJob, type PublishConfig } from './publish.js';
+import { createArt } from './fbt-art.js';
+import { activateRollback, processOneJob, publishCatalog, type PublishConfig } from './publish.js';
 import { assertSlot, type Group } from './types.js';
 import { acceptsButtonPrefix, databasePath, legacyName, rebrand } from './branding.js';
 import { URL_POOL_CAPACITY } from './url-pool.js';
@@ -479,12 +480,14 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
   if (action === 'backdropapprove' || action === 'backdropreject') {
     if (!reviewer(i)) throw new Error('Reviewer access is required.');
     decideBackdrop(store,Number(rawId),i.user.id,action === 'backdropapprove');
-    await i.update({ content: `${i.message.content}\n${action === 'backdropapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] }); return;
+    await i.update({ content: `${i.message.content}\n${action === 'backdropapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] });
+    await fbt.artDecided('backdrop',Number(rawId),action === 'backdropapprove').catch(() => undefined); return;
   }
   if (action === 'bannerapprove' || action === 'bannerreject') {
     if (!reviewer(i)) throw new Error('Reviewer access is required.');
     decideBillboard(store,Number(rawId),i.user.id,action === 'bannerapprove');
-    await i.update({ content: `${i.message.content}\n${action === 'bannerapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] }); return;
+    await i.update({ content: `${i.message.content}\n${action === 'bannerapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] });
+    await fbt.artDecided('billboard',Number(rawId),action === 'bannerapprove').catch(() => undefined); return;
   }
   if (action === 'approve' || action === 'reject') {
     if (!reviewer(i)) throw new Error('Reviewer access is required.');
@@ -493,11 +496,13 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
     const result = store.decide(id,i.user.id,action === 'approve');
     await i.update({ content: `${i.message.content}\n**${result.status.toUpperCase()}** by <@${i.user.id}>`, components: [] });
     await auditLog(i.guild,`Poster #${id} ${result.status} by <@${i.user.id}>.`);
+    await fbt.artDecided('poster',id,action === 'approve').catch(() => undefined);
     return;
   }
 }
+const art = createArt({ store, dataDir, client, guildId, auditLog });
 const fbt = createFbt({
-  client, store, guildId,
+  client, store, guildId, art,
   site: { url: process.env.FBT_SITE_URL, secret: process.env.FBT_BOT_SECRET },
   publicUrl: process.env.FBT_PUBLIC_URL ?? process.env.FBT_SITE_URL ?? 'https://dsc.gg/wreckshop',
   welcome, isAdmin: admin, auditLog,
@@ -571,6 +576,12 @@ client.once('ready', async () => {
     try {
       const result = await processOneJob(store,publishConfig);
       if (result) { console.log(result); await auditLog(client.guilds.cache.get(guildId) ?? null,result); }
+      else if (store.setting('catalog-dirty') === '1') {
+        // A full publish also writes the catalog, so a look change only needs this when nothing else ran.
+        store.setSetting('catalog-dirty','0');
+        const looks = await publishCatalog(store,publishConfig).catch(error => { store.setSetting('catalog-dirty','1'); throw error; });
+        if (looks) console.log(looks);
+      }
     } catch (error) { console.error('Publishing job failed:', error); }
     finally { publishing = false; }
   },30_000);

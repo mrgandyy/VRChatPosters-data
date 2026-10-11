@@ -27,6 +27,38 @@ export async function sitePost<T>(c: SiteConfig, path: string, payload: unknown,
   }
 }
 
+/** Signed POST that returns raw bytes (artwork uploaded on the website). Throws on failure. */
+export async function siteBytes(c: SiteConfig, path: string, payload: unknown, timeoutMs = 30_000): Promise<Buffer> {
+  if (!siteEnabled(c)) throw new Error('The website link is not configured yet.');
+  const body = JSON.stringify(payload);
+  const ts = String(Date.now());
+  const sig = createHmac('sha256', c.secret!).update(`${ts}.${body}`).digest('hex');
+  const res = await fetch(c.url!.replace(/\/$/, '') + path, {
+    method: 'POST', body, signal: AbortSignal.timeout(timeoutMs),
+    headers: { 'content-type': 'application/json', 'x-fbt-timestamp': ts, 'x-fbt-signature': sig },
+  });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({})) as Record<string, unknown>;
+    const err = new Error(String(json.error ?? `The website said ${res.status}.`)) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/** Which custom art each group has approved: poster numbers, billboard, backdrop. */
+export function artOf(store: Store): Map<number, { posters: number[]; billboard: boolean; backdrop: boolean }> {
+  const out = new Map<number, { posters: number[]; billboard: boolean; backdrop: boolean }>();
+  const get = (g: number) => { let a = out.get(g); if (!a) out.set(g, a = { posters: [], billboard: false, backdrop: false }); return a; };
+  for (const r of store.db.prepare('SELECT group_id AS g, slot FROM assignments ORDER BY slot').all() as { g: number; slot: number }[]) get(r.g).posters.push(r.slot);
+  const flag = (table: string, key: 'billboard' | 'backdrop') => {
+    try { for (const r of store.db.prepare(`SELECT groupId AS g FROM ${table}`).all() as { g: number }[]) get(r.g)[key] = true; } catch { /* table not created yet */ }
+  };
+  flag('billboard_assignments', 'billboard');
+  flag('backdrop_assignments', 'backdrop');
+  return out;
+}
+
 /** Verified = VRChat group linked and hosting rules accepted. No staff step. */
 export function isVerified(g: Pick<Group, 'vrchatUrl' | 'agreementVersion'>): boolean {
   return Boolean(g.vrchatUrl && g.agreementVersion);
@@ -59,6 +91,7 @@ export function syncPayload(store: Store, staff?: string[], names?: Map<string, 
   const reps = store.db.prepare('SELECT group_id AS g, user_id AS u FROM representatives').all() as { g: number; u: string }[];
   const byGroup = new Map<number, string[]>();
   for (const r of reps) byGroup.set(r.g, [...(byGroup.get(r.g) ?? []), r.u]);
+  const art = artOf(store);
   return {
     full: true,
     groups: store.groups().map(g => ({
@@ -67,6 +100,7 @@ export function syncPayload(store: Store, staff?: string[], names?: Map<string, 
       reps: (byGroup.get(g.id) ?? []).filter(u => /^\d{5,25}$/.test(u)),
       code: /^\d{8}$/.test(g.code) ? g.code : undefined,
       repNames: Object.fromEntries((byGroup.get(g.id) ?? []).flatMap(u => names?.get(u) ? [[u, names.get(u)!.slice(0, 64)]] : [])),
+      art: art.get(g.id) ?? { posters: [], billboard: false, backdrop: false },
     })),
     ...(staff ? { staff: [...new Set(staff)].filter(u => /^\d{5,25}$/.test(u)).slice(0, 200) } : {}),
   };

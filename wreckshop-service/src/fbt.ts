@@ -9,11 +9,12 @@ import {
 } from 'discord.js';
 import type { Store } from './db.js';
 import { normalizeGroupLink, validateGroupName } from './group-link.js';
-import { groupVerified, sitePost, siteEnabled, statusLabel, syncGroups, type OutboxFailure, type OutboxItem, type SiteConfig } from './fbt-site.js';
+import { groupVerified, siteBytes, sitePost, siteEnabled, statusLabel, syncGroups, type OutboxFailure, type OutboxItem, type SiteConfig } from './fbt-site.js';
 import { applyAdmin, setLevel, type AdminAction } from './fbt-admin.js';
 import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import type { Group } from './types.js';
+import type { Art, ArtKind } from './fbt-art.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
 const RULES_VERSION = 'vrchat-rules-v1';
@@ -28,6 +29,8 @@ export interface FbtDeps {
   welcome: boolean;
   isAdmin: (i: ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction) => boolean;
   auditLog: (guild: Guild | null, message: string) => Promise<void>;
+  /** Artwork reviews (posters, billboard, backdrop) shared with the slash commands. */
+  art?: Art;
 }
 
 type Reply = ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction;
@@ -605,6 +608,20 @@ export function createFbt(d: FbtDeps) {
     return Boolean(user && await user.send(payload).catch(() => undefined));
   }
 
+  const ART_NOUN: Record<ArtKind, string> = { poster: 'poster', billboard: 'billboard', backdrop: 'photo-wall backdrop' };
+  /** A review finished (in Discord or on the website): tell the website and the person who sent it. */
+  async function artDecided(kind: ArtKind, id: number, approve: boolean, note?: string): Promise<void> {
+    const uploadId = d.art?.uploadFor(kind, id);
+    if (uploadId) await sitePost(d.site, '/api/bot/upload/status', { uploadId, status: approve ? 'approved' : 'rejected', reviewId: id, note: note ?? null });
+    const r = d.art?.reviewOf(kind, id);
+    const g = r ? store.group(r.groupId) : undefined;
+    if (!r || !g || !uploadId) return; // Discord submitters already see the card outcome in /poster list
+    const what = kind === 'poster' ? `poster ${r.slot}` : ART_NOUN[kind];
+    await dm(r.submitter, approve
+      ? `✅ Your ${what} for **${g.name}** was approved. It goes live in the world with the next publish, usually within a few minutes. ${url(`/manage`)}`
+      : `Your ${what} for **${g.name}** wasn't approved.${note ? `\nStaff note: ${note}` : ''}\nYou can upload a new one any time: ${url('/manage')}`);
+  }
+
   async function deliver(item: OutboxItem): Promise<void> {
     const p = item.payload as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
     const guild = d.client.guilds.cache.get(d.guildId) ?? null;
@@ -704,6 +721,62 @@ export function createFbt(d: FbtDeps) {
         });
         return;
       }
+      case 'upload.submit': {
+        if (!d.art) throw new Error('Artwork reviews are not available.');
+        let bytes: Buffer;
+        try { bytes = await siteBytes(d.site, '/api/bot/upload/fetch', { uploadId: p.uploadId }); }
+        catch (e) { if ((e as { status?: number }).status === 404) return; throw e; } // withdrawn on the site
+        try {
+          const id = await d.art.submit(p.kind as ArtKind, Number(p.groupId), p.slot == null ? null : Number(p.slot), String(p.by), bytes, String(p.uploadId));
+          await sitePost(d.site, '/api/bot/upload/status', { uploadId: p.uploadId, status: 'in_review', reviewId: id });
+        } catch (e) {
+          const message = (e as Error).message;
+          if (/approval channel/i.test(message)) throw e; // our setup problem: retry once it's fixed
+          await sitePost(d.site, '/api/bot/upload/status', { uploadId: p.uploadId, status: 'failed', note: message.slice(0, 300) });
+        }
+        return;
+      }
+      case 'upload.pending': {
+        // Page art (banner, logo, photo) is reviewed on the website; give reviewers a nudge.
+        const approvals = store.setting('approval_channel');
+        const ch = approvals && guild ? guild.channels.cache.get(approvals) : undefined;
+        const what = p.kind === 'banner' ? 'page banner' : p.kind === 'logo' ? 'logo' : 'gallery photo';
+        if (ch?.type === ChannelType.GuildText) await (ch as TextChannel).send({
+          content: `🖼️ **${p.groupName}** uploaded a ${what} for their venue page (by <@${p.by}>). Review it in the Control room.`,
+          components: [linkRow(['Review artwork', url('/staff?tab=reviews')])], allowedMentions: { parse: [] },
+        });
+        return;
+      }
+      case 'upload.decided': {
+        const what = p.kind === 'banner' ? 'page banner' : p.kind === 'logo' ? 'logo' : 'gallery photo';
+        await d.auditLog(guild, `${what[0]!.toUpperCase()}${what.slice(1)} for ${p.groupName} ${p.approve ? 'approved' : 'rejected'} by <@${p.by}> on the website.`);
+        await dm(String(p.uploader), p.approve
+          ? `✅ Your ${what} for **${p.groupName}** was approved and is on your venue page now. ${url('/manage')}`
+          : `Your ${what} for **${p.groupName}** wasn't approved.${p.note ? `\nStaff note: ${p.note}` : ''}\nYou can upload a new one any time: ${url('/manage')}`);
+        return;
+      }
+      case 'look.set': {
+        const groupId = Number(p.groupId);
+        if (!store.group(groupId)) return;
+        store.setSetting(`look-${groupId}`, JSON.stringify({ accent: p.accent ?? '', glow: Number(p.glow ?? 1) }));
+        store.setSetting('catalog-dirty', '1');
+        return;
+      }
+      case 'upload.decide': {
+        if (!d.art) throw new Error('Artwork reviews are not available.');
+        const kind = p.kind as ArtKind, id = Number(p.reviewId);
+        try { await d.art.decide(kind, id, Boolean(p.approve), String(p.by)); }
+        catch (e) {
+          // Already decided in Discord, or the group changed tier: report what actually happened.
+          const r = d.art.reviewOf(kind, id);
+          if (r && r.status !== 'submitted') { await artDecided(kind, id, r.status === 'approved'); return; }
+          await sitePost(d.site, '/api/bot/upload/status', { uploadId: p.uploadId, status: 'failed', note: (e as Error).message.slice(0, 300) });
+          return;
+        }
+        await artDecided(kind, id, Boolean(p.approve), p.note ? String(p.note) : undefined);
+        scheduleSync();
+        return;
+      }
       default:
         console.warn('Unknown outbox item', item.kind);
     }
@@ -736,5 +809,5 @@ export function createFbt(d: FbtDeps) {
     setInterval(() => void sitePost(d.site, '/api/cron/rollup', {}, 60_000), 10 * 60_000);
   }
 
-  return { commands, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver };
+  return { commands, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver, artDecided };
 }

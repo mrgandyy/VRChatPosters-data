@@ -33,6 +33,25 @@ export function poolIndex(group: Group, revision: number): number {
     throw new Error('Authored atlas URL capacity exhausted; extend and reupload the world.');
   return group.atlasSlot * RELEASES_PER_GROUP + revision - 1;
 }
+/** Brand look from the website: accent '#rrggbb' ('' = club default) and glow 0 soft, 1 standard, 2 bright. */
+export function lookOf(store: Store, groupId: number): { accent: string; glow: number } {
+  try {
+    const v = JSON.parse(store.setting(`look-${groupId}`) ?? '{}') as { accent?: unknown; glow?: unknown };
+    const accent = typeof v.accent === 'string' && /^#[0-9a-f]{6}$/.test(v.accent) ? v.accent : '';
+    const glow = v.glow === 0 || v.glow === 2 ? v.glow : 1;
+    return { accent, glow };
+  } catch { return { accent: '', glow: 1 }; }
+}
+
+/** Republish only catalog.json (looks changed; no artwork changed). */
+export async function publishCatalog(store: Store, config: PublishConfig): Promise<string | undefined> {
+  if (config.dryRun || !config.token || !config.owner || !config.repository || !config.publicBase) return undefined;
+  const next = catalog(store);
+  const changed = await githubPut(config,'catalog.json',next,'Update Wreckshop venue looks');
+  if (changed) await verifyPublic(`${config.publicBase.replace(/\/$/,'')}/catalog.json`,sha(next));
+  return changed ? 'Published venue looks to the world catalog.' : undefined;
+}
+
 export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacement?: BannerRelease, backdropReplacement?: BackdropRelease): Buffer {
   const groups = store.groups().map(group => {
     const active = replacement?.groupId === group.id ? replacement : store.activeRelease(group.id);
@@ -45,7 +64,9 @@ export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacemen
       atlasBPoolIndex: active && ((replacement?.groupId === group.id && replacement.sha256B) || sheetBRelease(store,group.id,active.revision)) ? active.poolIndex : -1,
       billboardPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && bannerReplacement ? bannerReplacement : liveBillboard(store,group.id))?.poolIndex ?? -1) : -1,
       backdropPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && backdropReplacement ? backdropReplacement : liveBackdrop(store,group.id))?.poolIndex ?? -1) : -1,
-      atlasSha256: active?.sha256 ?? ''
+      atlasSha256: active?.sha256 ?? '',
+      // The group's brand colour and glow (chosen on the website). The world may map it to its nearest accent.
+      ...lookOf(store, group.id)
     };
   });
   return Buffer.from(JSON.stringify({ schema: 1, brand: 'Wreckshop Worlds',
