@@ -116,6 +116,11 @@ export async function ensureArtworkGuide(guild: Guild, store: Store, siteUrl: st
   const oldMine = recent ? [...recent.values()].filter((m) => m.author.id === me && m.id !== msg!.id) : [];
   if (oldMine.length) console.log(`Older bot posts in #${ch.name} (${oldMine.length}):\n` + oldMine.slice(0, 10).map((m) =>
     `    ${m.id} ${m.createdAt.toISOString().slice(0, 10)}: ${(m.content || m.embeds[0]?.title || m.embeds[0]?.description || '[attachment]').replace(/\s+/g, ' ').slice(0, 140)}`).join('\n'));
+  if (store.setting('artwork-guide-dump') !== '2') {
+    // One-time: print the old guide posts in full so staff can review what they said.
+    for (const m of oldMine) console.log(`--- ${m.id} ---\n${m.content}`);
+    store.setSetting('artwork-guide-dump', '2');
+  }
   const list = others.slice(0, 8).map((m) => `    ${m.author.username} ${m.createdAt.toISOString().slice(0, 10)}: ${m.content.replace(/\s+/g, ' ').slice(0, 90) || '[embed/attachment]'}`).join('\n');
   return `Artwork guide ready in #${ch.name}.${others.length ? ` Other messages there (left alone):\n${list}` : ''}`;
 }
