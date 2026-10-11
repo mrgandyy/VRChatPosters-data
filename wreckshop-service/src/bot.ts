@@ -4,8 +4,9 @@ import {
   ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client,
   GatewayIntentBits, MessageFlags, PermissionFlagsBits, SlashCommandBuilder,
   type Attachment, type ButtonInteraction, type ChatInputCommandInteraction, type Guild,
-  type TextChannel
+  type ModalSubmitInteraction, type TextChannel
 } from 'discord.js';
+import { createFbt } from './fbt.js';
 import { submitBillboard, decideBillboard } from './billboard.js';
 import { join, resolve } from 'node:path';
 import { Store } from './db.js';
@@ -28,7 +29,9 @@ const publishConfig: PublishConfig = {
   defaultsDir: resolve(process.env.WRECKSHOP_DEFAULTS_DIR ?? './defaults'), dataDir,
   dryRun: process.env.WRECKSHOP_DRY_RUN !== 'false'
 };
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// Welcome messages need the Server Members intent (Discord Developer Portal → Bot → Privileged Gateway Intents).
+const welcome = process.env.FBT_WELCOME !== 'false';
+const client = new Client({ intents: welcome ? [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] : [GatewayIntentBits.Guilds] });
 let publishing = false;
 const ephemeral = MessageFlags.Ephemeral;
 
@@ -109,7 +112,7 @@ const group = new SlashCommandBuilder().setName('group').setDescription('Wrecksh
   .addSubcommand(s => s.setName('tier').setDescription('Assign tier')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addStringOption(o => o.setName('value').setDescription('Tier').setRequired(true).addChoices(
-      { name: 'Standard', value: 'standard' },{ name: 'Premium', value: 'premium' })))
+      { name: 'Standard', value: 'standard' },{ name: 'Premium', value: 'premium' },{ name: 'Headliner', value: 'headliner' })))
   .addSubcommand(s => s.setName('code').setDescription('Change shareable preset code')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
     .addStringOption(o => o.setName('value').setDescription('Eight digits').setRequired(true)))
@@ -151,14 +154,14 @@ const publish = new SlashCommandBuilder().setName('publish').setDescription('Pub
     .addIntegerOption(o => o.setName('revision').setDescription('Published revision').setRequired(true)));
 const help = new SlashCommandBuilder().setName('ws-help').setDescription('Wreckshop help');
 
-function admin(interaction: ChatInputCommandInteraction | ButtonInteraction): boolean {
+function admin(interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction): boolean {
   return !!(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
     hasMemberRole(interaction,store.setting('admin_role')));
 }
 function reviewer(interaction: ChatInputCommandInteraction | ButtonInteraction): boolean {
   return admin(interaction) || hasMemberRole(interaction,store.setting('reviewer_role'));
 }
-function hasMemberRole(interaction: ChatInputCommandInteraction | ButtonInteraction, roleId: string | undefined): boolean {
+function hasMemberRole(interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction, roleId: string | undefined): boolean {
   if (!roleId || !interaction.member) return false;
   const roles = interaction.member.roles;
   return Array.isArray(roles) ? roles.includes(roleId) : roles.cache.has(roleId);
@@ -413,7 +416,11 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
     const user = i.options.getUser('user',true);
     if (i.options.getString('action',true) === 'add') store.addRepresentative(groupId,user.id);
     else store.removeRepresentative(groupId,user.id);
-  } else if (sub === 'tier') store.setTier(groupId,i.options.getString('value',true) as 'standard'|'premium');
+  } else if (sub === 'tier') {
+    const value = i.options.getString('value',true);
+    if (value === 'headliner') store.setHeadliner(groupId,true);
+    else { store.setTier(groupId,value as 'standard'|'premium'); store.setHeadliner(groupId,false); }
+  }
   else if (sub === 'code') store.setCode(groupId,i.options.getString('value',true));
   else if (sub === 'suspend') store.setEnabled(groupId,i.options.getBoolean('enabled',true));
   else if (sub === 'page') store.setUrl(groupId,i.options.getString('url',true));
@@ -486,19 +493,32 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
     return;
   }
 }
+const fbt = createFbt({
+  client, store, guildId,
+  site: { url: process.env.FBT_SITE_URL, secret: process.env.FBT_BOT_SECRET },
+  publicUrl: process.env.FBT_PUBLIC_URL ?? process.env.FBT_SITE_URL ?? 'https://dsc.gg/wreckshop',
+  welcome, isAdmin: admin, auditLog,
+});
+client.on('guildMemberAdd', member => { void fbt.onMemberAdd(member).catch(error => console.error('Welcome failed:',error)); });
 client.on('interactionCreate', async interaction => {
   try {
-    if (interaction.isButton()) { await handleButton(interaction); return; }
+    if (interaction.isAutocomplete()) { await fbt.handleAutocomplete(interaction).catch(() => undefined); return; }
+    if (interaction.isModalSubmit()) { await fbt.handleModal(interaction); return; }
+    if (interaction.isButton()) {
+      if (!(await fbt.handleButton(interaction))) { await handleButton(interaction); fbt.scheduleSync(); }
+      return;
+    }
     if (!interaction.isChatInputCommand()) return;
     if (interaction.guildId !== guildId) throw new Error('Use this in the configured server.');
+    if (await fbt.handleCommand(interaction)) return;
     if (interaction.commandName === 'ws-setup') await handleSetup(interaction);
     else if (interaction.commandName === 'backdrop') await handleBackdrop(interaction);
     else if (interaction.commandName === 'billboard') await handleBillboard(interaction);
     else if (interaction.commandName === 'poster') await handlePoster(interaction);
-    else if (interaction.commandName === 'group') await handleGroup(interaction);
+    else if (interaction.commandName === 'group') { await handleGroup(interaction); fbt.scheduleSync(); }
     else if (interaction.commandName === 'publish') await handlePublish(interaction);
     else if (interaction.commandName === 'ws-help') await interaction.reply({ content:
-      'Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Standard: slots 1–8; Premium: slots 1–32. For slot 17 onward, use the same /poster submit command. Repeat batches as needed. Posters: portrait 2:3, recommended 1024 x 1536. Billboard: 2048 x 512. Photo backdrop: 2048 x 1536. Static PNG/JPEG/WebP, up to 12 MB and 30 MP, dimensions 256–8192 px. Slots 17–32 require the updated world. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
+      'New here? Run `/start` for the step-by-step: register, get verified, host a night, collab, and apply for Premium or Headliner. Advertise your group for free. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Standard: slots 1–8; Premium: slots 1–32. For slot 17 onward, use the same /poster submit command. Repeat batches as needed. Posters: portrait 2:3, recommended 1024 x 1536. Billboard: 2048 x 512. Photo backdrop: 2048 x 1536. Static PNG/JPEG/WebP, up to 12 MB and 30 MP, dimensions 256–8192 px. Slots 17–32 require the updated world. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {
@@ -519,7 +539,7 @@ client.once('ready', async () => {
   }
   const guild = await client.guilds.fetch(guildId);
   if(store.setting('recognition-privacy-v2')!=='applied'){store.queuePublish(0);store.setSetting('recognition-privacy-v2','applied');}
-  await guild.commands.set([poster,group,setup,publish,help,billboard,backdrop]);
+  await guild.commands.set([poster,group,setup,publish,help,billboard,backdrop,...fbt.commands]);
   if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
     try { await ensureGuildSetup(guild); console.log('Wreckshop channels and panel ready.'); }
     catch (error) { console.error('Automatic channel setup failed:',error); }
@@ -536,6 +556,11 @@ client.once('ready', async () => {
     store.setSetting('pages-recovery-20261005','queued');
     console.log(`Queued ${failed.length} interrupted public-data publications for recovery.`);
   }
+  if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
+    try { await fbt.onReady(guild); console.log('FBT Social start-here and events channels ready.'); }
+    catch (error) { console.error('FBT Social setup failed:',error); }
+  }
+  fbt.startLoops();
   console.log('Wreckshop Worlds service ready.');
   setInterval(async () => {
     if (publishing) return;

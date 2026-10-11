@@ -1,5 +1,19 @@
 # Wreckshop Worlds service
 
+## FBT Social website link (11 October 2026)
+
+The bot is the Discord front door for the FBT Social website (`fbt-social-web` on Railway).
+
+- **Welcome:** new members get a short welcome in the server's system channel (or `#start-here`) and a DM with the Start Here guide. Needs **Server Members Intent** in the Discord Developer Portal; set `FBT_WELCOME=false` to switch it off.
+- **`#start-here`:** read-only channel with a permanent panel: Register my group (a form, no command needed), Get verified, Apply for Premium/Headliner, Host a night, Start a collab, Posters, and a link to the Strip. `/start` shows the same panel privately.
+- **Verified is automatic:** VRChat group linked plus hosting rules accepted (`/group accept` or the panel's button). No staff step.
+- **Premium/Headliner applications:** `/apply` or the panel opens a short form. Staff get a card in the approvals channel with the group's season heat, nights hosted, best night, events and collabs, plus Approve/Decline buttons (admins only). Approving sets the tier here and the bot DMs the applicant. Headliner is stored as `level='headliner'` on a premium group; the world catalog still says `premium`, so no world update is needed.
+- **Events:** `/event create|list|cancel` (or the website). Events are announced in `#fbt-events` and, if the bot has Manage Events, created as Discord scheduled events.
+- **Collabs:** `/collab start|list` (or the website). Partner representatives get a DM with Accept/Decline. Both groups must agree; it can be logged up to 24 hours after the night.
+- **Sync:** the bot pushes its groups to the website every 3 minutes and after every group change, polls the website's outbox every 8 seconds, and asks the website to recompute heat every 10 minutes.
+- Variables: `FBT_SITE_URL`, `FBT_PUBLIC_URL`, `FBT_BOT_SECRET` (same value as on the website), `FBT_WELCOME`.
+
+
 ## Publishing recovery (7 October 2026)
 
 Pages deployments use a unique artifact name for each run attempt and retry failed deployment steps twice with backoff. If an asset or catalog is already committed but is missing or stale on Pages, the publisher commits a hidden `.pages-recovery.json` marker to trigger a fresh deployment before verifying the public bytes again. Already-live identical files do not trigger builds. This uses the existing Contents permission; no additional token permissions are needed.

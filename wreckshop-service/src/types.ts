@@ -11,6 +11,8 @@ export interface Group {
   agreementAt: string | null;
   atlasSlot: number;
   revision: number;
+  /** 'headliner' on top of premium; null otherwise. */
+  level?: string | null;
 }
 export interface Submission {
   id: number;

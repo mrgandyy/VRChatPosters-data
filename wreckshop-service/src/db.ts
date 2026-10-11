@@ -55,6 +55,9 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
+    // Headliner sits on top of premium; the world only ever sees tier 'premium'.
+    if (!(this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[]).some(c => c.name === 'level'))
+      this.db.exec('ALTER TABLE groups ADD COLUMN level TEXT');
     this.migratePosterCapacity(path);
     initializeBillboards(this);
     initializeBackdrops(this);
@@ -65,6 +68,7 @@ export class Store {
       this.db.exec('ALTER TABLE groups ADD COLUMN agreement_by TEXT');
     if (!columns.some(column => column.name === 'deleted'))
       this.db.exec('ALTER TABLE groups ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
+
     this.db.prepare("UPDATE jobs SET status='queued' WHERE status='publishing'").run();
     this.db.prepare(`INSERT OR IGNORE INTO groups(id,name,tier,code,enabled,atlas_slot)
       VALUES(0,'Wreckshop Worlds','premium','00000000',1,0)`).run();
@@ -106,17 +110,17 @@ export class Store {
   group(id: number): Group | undefined {
     return this.db.prepare(`SELECT id,name,tier,code,enabled,vrchat_url AS vrchatUrl,
       agreement_version AS agreementVersion,agreement_at AS agreementAt,
-      atlas_slot AS atlasSlot,revision FROM groups WHERE id=? AND deleted=0`).get(id) as Group | undefined;
+      atlas_slot AS atlasSlot,revision,level FROM groups WHERE id=? AND deleted=0`).get(id) as Group | undefined;
   }
   groupByCode(code: string): Group | undefined {
     return this.db.prepare(`SELECT id,name,tier,code,enabled,vrchat_url AS vrchatUrl,
       agreement_version AS agreementVersion,agreement_at AS agreementAt,
-      atlas_slot AS atlasSlot,revision FROM groups WHERE code=? AND deleted=0`).get(code) as Group | undefined;
+      atlas_slot AS atlasSlot,revision,level FROM groups WHERE code=? AND deleted=0`).get(code) as Group | undefined;
   }
   groups(): Group[] {
     return this.db.prepare(`SELECT id,name,tier,code,enabled,vrchat_url AS vrchatUrl,
       agreement_version AS agreementVersion,agreement_at AS agreementAt,
-      atlas_slot AS atlasSlot,revision FROM groups WHERE deleted=0 ORDER BY id`).all() as Group[];
+      atlas_slot AS atlasSlot,revision,level FROM groups WHERE deleted=0 ORDER BY id`).all() as Group[];
   }
   registerGroup(name: string, tier: Tier = 'standard', vrchatGroup?: string, userId?: string): Group {
     return this.db.transaction(() => {
@@ -200,10 +204,24 @@ export class Store {
     this.db.transaction(() => {
       this.db.prepare('UPDATE groups SET tier=? WHERE id=?').run(tier, groupId);
       if (tier === 'standard') {
+        this.db.prepare('UPDATE groups SET level=NULL WHERE id=?').run(groupId);
         this.db.prepare('DELETE FROM assignments WHERE group_id=? AND slot>8').run(groupId);
       }
       this.queuePublish(groupId);
     })();
+  }
+  /** Headliner is premium plus a flag; removing it leaves the group premium. */
+  setHeadliner(groupId: number, on: boolean): void {
+    if (groupId === 0) throw new Error('Default configuration cannot change level.');
+    if (!this.group(groupId)) throw new Error('Group not found.');
+    this.db.transaction(() => {
+      if (on) this.db.prepare("UPDATE groups SET tier='premium',level='headliner' WHERE id=?").run(groupId);
+      else this.db.prepare('UPDATE groups SET level=NULL WHERE id=?').run(groupId);
+      this.queuePublish(groupId);
+    })();
+  }
+  representatives(groupId: number): string[] {
+    return (this.db.prepare('SELECT user_id FROM representatives WHERE group_id=?').all(groupId) as {user_id:string}[]).map(r => r.user_id);
   }
   setCode(groupId: number, code: string): void {
     if (groupId === 0) throw new Error('Default code is fixed.');
@@ -238,7 +256,7 @@ export class Store {
   representedGroups(userId: string): Group[] {
     return this.db.prepare(`SELECT g.id,g.name,g.tier,g.code,g.enabled,g.vrchat_url AS vrchatUrl,
       g.agreement_version AS agreementVersion,g.agreement_at AS agreementAt,
-      g.atlas_slot AS atlasSlot,g.revision FROM groups g
+      g.atlas_slot AS atlasSlot,g.revision,g.level FROM groups g
       JOIN representatives r ON r.group_id=g.id WHERE r.user_id=? ORDER BY g.name`).all(userId) as Group[];
   }
   canRepresent(groupId: number, userId: string): boolean {

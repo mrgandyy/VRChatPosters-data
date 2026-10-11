@@ -1,0 +1,606 @@
+// FBT Social features: welcome + Start Here panel, one-tap verification, Premium/Headliner
+// applications with staff review, events and collabs. The website (fbt-social-web on Railway)
+// holds events, collabs and applications; this bot is the Discord front door to all of it.
+import {
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, LabelBuilder, ModalBuilder, PermissionFlagsBits,
+  SlashCommandBuilder, TextInputBuilder, TextInputStyle, GuildScheduledEventEntityType, GuildScheduledEventPrivacyLevel,
+  type AutocompleteInteraction, type ButtonInteraction, type ChatInputCommandInteraction, type Client, type Guild,
+  type GuildMember, type ModalSubmitInteraction, type TextChannel, type User,
+} from 'discord.js';
+import type { Store } from './db.js';
+import { normalizeGroupLink, validateGroupName } from './group-link.js';
+import { isVerified, sitePost, siteEnabled, statusLabel, syncGroups, type OutboxItem, type SiteConfig } from './fbt-site.js';
+import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
+import type { Group } from './types.js';
+
+const EPHEMERAL = 64; // MessageFlags.Ephemeral
+const RULES_VERSION = 'vrchat-rules-v1';
+const ROSE = 0xe8507a, BRONZE = 0xb98a4e, EMERALD = 0x2fbf83, GOLD = 0xf2c94c;
+
+export interface FbtDeps {
+  client: Client;
+  store: Store;
+  guildId: string;
+  site: SiteConfig;
+  publicUrl: string;
+  welcome: boolean;
+  isAdmin: (i: ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction) => boolean;
+  auditLog: (guild: Guild | null, message: string) => Promise<void>;
+}
+
+type Reply = ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction;
+type Whois = { mine: { id: number; name: string; status: string }[]; partners: { id: number; name: string }[] };
+
+export function createFbt(d: FbtDeps) {
+  const { store } = d;
+  const url = (path: string) => `${d.publicUrl.replace(/\/$/, '')}${path}`;
+  const groupOf = (userId: string): Group | undefined => store.representedGroups(userId)[0];
+  const tzOf = (userId: string) => store.setting(`fbt-tz-${userId}`);
+
+  // ── Website sync ─────────────────────────────────────────────────────────────────────────
+  let syncTimer: NodeJS.Timeout | undefined;
+  function scheduleSync(delayMs = 4000) {
+    if (!siteEnabled(d.site)) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(async () => {
+      const r = await syncGroups(store, d.site);
+      if (!r.ok) console.error('Website group sync failed:', r.error);
+    }, delayMs);
+  }
+
+  const whoisCache = new Map<string, { at: number; data: Whois }>();
+  async function whois(userId: string): Promise<Whois> {
+    const hit = whoisCache.get(userId);
+    if (hit && Date.now() - hit.at < 60_000) return hit.data;
+    const r = await sitePost<Whois>(d.site, '/api/bot/whois', { actor: userId });
+    const data = r.ok ? r.data : { mine: [], partners: [] };
+    whoisCache.set(userId, { at: Date.now(), data });
+    return data;
+  }
+
+  // ── Channels ─────────────────────────────────────────────────────────────────────────────
+  async function ensureChannel(guild: Guild, key: string, name: string, readOnly: boolean): Promise<TextChannel> {
+    const saved = store.setting(key);
+    const existing = (saved && guild.channels.cache.get(saved)) ||
+      guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === name);
+    if (existing?.type === ChannelType.GuildText) { store.setSetting(key, existing.id); return existing as TextChannel; }
+    const created = await guild.channels.create({
+      name, type: ChannelType.GuildText,
+      permissionOverwrites: readOnly ? [
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.SendMessages], allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] },
+        { id: guild.members.me!.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks] },
+      ] : undefined,
+    });
+    store.setSetting(key, created.id);
+    return created;
+  }
+  const channel = (key: string): TextChannel | undefined => {
+    const id = store.setting(key);
+    const c = id ? d.client.guilds.cache.get(d.guildId)?.channels.cache.get(id) : undefined;
+    return c?.type === ChannelType.GuildText ? c as TextChannel : undefined;
+  };
+
+  // ── The Start Here panel ─────────────────────────────────────────────────────────────────
+  function startEmbed() {
+    return new EmbedBuilder().setColor(ROSE).setTitle('Welcome to FBT Social')
+      .setDescription([
+        'Any group can host at FBT Social. Every group gets a resort on **The Strip**, and the bigger your crowd, the brighter it burns.',
+        '',
+        '**1 · Register your group:** free, one minute.',
+        '**2 · Get verified:** link your VRChat group and accept the hosting rules. Unlocks collabs.',
+        '**3 · Host a night:** post your event; it gets announced here and lit up on the Strip.',
+        '**4 · Collab:** team up with another group and you both earn the night\'s heat, plus a bonus.',
+        '**5 · Premium or Headliner:** apply any time; staff review it here.',
+        '',
+        'Just here to party? Find tonight\'s nights on the Strip.',
+      ].join('\n'))
+      .setURL(url('/start'));
+  }
+  function startRows() {
+    return [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('fbt:verify').setLabel('Get verified').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('fbt:apply').setLabel('Apply: Premium / Headliner').setStyle(ButtonStyle.Secondary)),
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId('fbt:host').setLabel('Host a night').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('fbt:collab').setLabel('Start a collab').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('fbt:posters').setLabel('Posters & billboards').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setLabel('The Strip').setStyle(ButtonStyle.Link).setURL(url('/'))),
+    ];
+  }
+
+  async function onReady(guild: Guild): Promise<void> {
+    await Promise.all([guild.channels.fetch(), guild.members.fetchMe()]);
+    const start = await ensureChannel(guild, 'fbt_start_channel', 'start-here', true);
+    await ensureChannel(guild, 'fbt_events_channel', 'fbt-events', true);
+    const panel = { embeds: [startEmbed()], components: startRows() };
+    const old = store.setting('fbt_start_panel');
+    const msg = old ? await start.messages.fetch(old).catch(() => undefined) : undefined;
+    if (msg) await msg.edit(panel);
+    else store.setSetting('fbt_start_panel', (await start.send(panel)).id);
+    scheduleSync(1000);
+  }
+
+  // ── Welcome ──────────────────────────────────────────────────────────────────────────────
+  async function onMemberAdd(member: GuildMember): Promise<void> {
+    if (!d.welcome || member.user.bot || member.guild.id !== d.guildId) return;
+    const start = channel('fbt_start_channel');
+    const where = member.guild.systemChannel ?? start;
+    if (where) await where.send({
+      content: `Welcome to FBT Social, <@${member.id}>! Head to ${start ? `<#${start.id}>` : 'the start-here channel'} to register your group, host a night, or find tonight's parties.`,
+      allowedMentions: { users: [member.id] },
+    }).catch(e => console.error('Welcome post failed:', e));
+    const rows = [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary),
+      ...(start ? [new ButtonBuilder().setLabel('Open start-here').setStyle(ButtonStyle.Link).setURL(`https://discord.com/channels/${member.guild.id}/${start.id}`)] : []),
+      new ButtonBuilder().setLabel('The Strip').setStyle(ButtonStyle.Link).setURL(url('/start')))];
+    await member.send({ embeds: [startEmbed()], components: rows }).catch(() => undefined); // closed DMs are fine
+  }
+
+  // ── Small helpers ────────────────────────────────────────────────────────────────────────
+  const say = (i: Reply, content: string, components: ActionRowBuilder<ButtonBuilder>[] = []) =>
+    (i.deferred || i.replied ? i.editReply({ content, components }) : i.reply({ content, components, flags: EPHEMERAL }));
+  const linkRow = (...links: [string, string][]) =>
+    new ActionRowBuilder<ButtonBuilder>().addComponents(links.map(([label, href]) => new ButtonBuilder().setLabel(label).setStyle(ButtonStyle.Link).setURL(href)));
+  const textInput = (id: string, label: string, style: TextInputStyle, opts: { required?: boolean; max?: number; min?: number; placeholder?: string; value?: string } = {}) => {
+    const input = new TextInputBuilder().setCustomId(id).setStyle(style).setRequired(opts.required ?? true);
+    if (opts.max) input.setMaxLength(opts.max);
+    if (opts.min) input.setMinLength(opts.min);
+    if (opts.placeholder) input.setPlaceholder(opts.placeholder);
+    if (opts.value) input.setValue(opts.value);
+    return new LabelBuilder().setLabel(label).setTextInputComponent(input);
+  };
+
+  function verifyStatus(g: Group) {
+    const linked = Boolean(g.vrchatUrl), rules = Boolean(g.agreementVersion);
+    const lines = [
+      `**${g.name}** (#${g.id}) · ${statusLabel(g)}`,
+      '',
+      `✅ Registered · your code is \`${g.code}\``,
+      `${linked ? '✅' : '⬜'} VRChat group linked${linked ? '' : ': paste your VRChat group page link'}`,
+      `${rules ? '✅' : '⬜'} Hosting rules accepted`,
+      '',
+      isVerified(g) ? 'You\'re **verified**. Your resort gets bronze trim on the Strip, and collabs are unlocked.' : 'Finish both to get verified. It\'s instant, no staff step.',
+    ];
+    const row = new ActionRowBuilder<ButtonBuilder>();
+    if (!linked) row.addComponents(new ButtonBuilder().setCustomId('fbt:link').setLabel('Link VRChat group').setStyle(ButtonStyle.Primary));
+    if (!rules) row.addComponents(new ButtonBuilder().setCustomId('fbt:rules').setLabel('Read & accept hosting rules').setStyle(ButtonStyle.Primary));
+    if (isVerified(g)) row.addComponents(new ButtonBuilder().setCustomId('fbt:apply').setLabel('Apply: Premium / Headliner').setStyle(ButtonStyle.Secondary));
+    return { content: lines.join('\n'), components: row.components.length ? [row] : [] };
+  }
+
+  function needGroup(i: Reply): boolean {
+    if (groupOf(i.user.id)) return false;
+    void say(i, 'You don\'t represent a group yet. Register one first; it takes a minute.', [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary))]);
+    return true;
+  }
+
+  function applyChoices(g: Group) {
+    const row = new ActionRowBuilder<ButtonBuilder>();
+    if (g.tier !== 'premium') row.addComponents(new ButtonBuilder().setCustomId('fbt:applyp').setLabel('Apply for Premium').setStyle(ButtonStyle.Success));
+    if (g.level !== 'headliner') row.addComponents(new ButtonBuilder().setCustomId('fbt:applyh').setLabel('Apply for Headliner').setStyle(ButtonStyle.Primary));
+    row.addComponents(new ButtonBuilder().setLabel('What you get').setStyle(ButtonStyle.Link).setURL(url('/apply')));
+    return row;
+  }
+
+  function applyModal(level: 'premium' | 'headliner') {
+    return new ModalBuilder().setCustomId(`fbt:applym:${level}`).setTitle(level === 'premium' ? 'Apply for Premium' : 'Apply for Headliner')
+      .addLabelComponents(
+        textInput('about', 'Your group and your nights', TextInputStyle.Paragraph, { min: 20, max: 800, placeholder: 'What kind of nights you throw, who\'s on your team' }),
+        textInput('schedule', 'How often you host', TextInputStyle.Short, { max: 200, placeholder: 'Every Friday and Saturday' }),
+        textInput('crowd', 'Typical crowd', TextInputStyle.Short, { max: 100, placeholder: '30–50 people' }),
+        textInput('links', 'Links (optional)', TextInputStyle.Short, { required: false, max: 300, placeholder: 'Socials, VRChat group' }));
+  }
+
+  // ── Buttons ──────────────────────────────────────────────────────────────────────────────
+  async function handleButton(i: ButtonInteraction): Promise<boolean> {
+    const [prefix, action, arg] = i.customId.split(':');
+    if (prefix !== 'fbt') return false;
+    const g = groupOf(i.user.id);
+    switch (action) {
+      case 'reg': {
+        if (g) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
+        await i.showModal(new ModalBuilder().setCustomId('fbt:regm').setTitle('Register your group').addLabelComponents(
+          textInput('name', 'Group name (the real name, not a link)', TextInputStyle.Short, { max: 80 }),
+          textInput('vrc', 'VRChat group link or grp_ ID (optional)', TextInputStyle.Short, { required: false, max: 200, placeholder: 'https://vrchat.com/home/group/grp_…' })));
+        return true;
+      }
+      case 'verify':
+        if (needGroup(i)) return true;
+        await i.reply({ ...verifyStatus(g!), flags: EPHEMERAL });
+        return true;
+      case 'link':
+        if (needGroup(i)) return true;
+        await i.showModal(new ModalBuilder().setCustomId('fbt:linkm').setTitle('Link your VRChat group').addLabelComponents(
+          textInput('vrc', 'VRChat group page link or grp_ ID', TextInputStyle.Short, { max: 200, placeholder: 'https://vrchat.com/home/group/grp_…' })));
+        return true;
+      case 'rules':
+        if (needGroup(i)) return true;
+        await i.reply({
+          content: [
+            '**FBT Social hosting rules**',
+            '• Follow VRChat\'s Terms of Service and Community Guidelines at every event you host here.',
+            '• FBT Social is an 18+ venue. Run your nights accordingly.',
+            '• Handle problems with VRChat\'s own moderation and reporting tools.',
+            '• Your posters and billboards are reviewed by staff before they go live.',
+            '',
+            'This is an agreement, not age verification.',
+          ].join('\n'),
+          components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId('fbt:rulesok').setLabel('I agree').setStyle(ButtonStyle.Success))],
+          flags: EPHEMERAL,
+        });
+        return true;
+      case 'rulesok':
+        if (needGroup(i)) return true;
+        store.acceptAgreement(g!.id, RULES_VERSION, i.user.id);
+        scheduleSync();
+        await i.update(verifyStatus(store.group(g!.id)!));
+        await d.auditLog(i.guild, `Group #${g!.id} accepted the hosting rules (<@${i.user.id}>).`);
+        return true;
+      case 'apply':
+        if (needGroup(i)) return true;
+        if (!isVerified(g!)) { await i.reply({ ...verifyStatus(g!), flags: EPHEMERAL }); return true; }
+        if (g!.level === 'headliner') { await say(i, `${g!.name} is already a Headliner. Nothing to apply for.`); return true; }
+        await i.reply({ content: 'Apply any time. Staff review it here in Discord, and I\'ll DM you the answer.', components: [applyChoices(g!)], flags: EPHEMERAL });
+        return true;
+      case 'applyp': case 'applyh':
+        if (needGroup(i)) return true;
+        await i.showModal(applyModal(action === 'applyp' ? 'premium' : 'headliner'));
+        return true;
+      case 'host':
+        await say(i, 'Post your event on the website (easiest), or here with `/event create`. It shows up on the Strip\'s Coming Up view and gets announced in Discord.',
+          [linkRow(['Host a night', url('/host')])]);
+        return true;
+      case 'collab':
+        await say(i, 'Start a collab on the website, or here with `/collab start`. The other group confirms with one tap, and you both earn the night\'s heat in full, plus a bonus. Works before the night or up to 24 hours after.',
+          [linkRow(['Collabs', url('/collabs')])]);
+        return true;
+      case 'posters':
+        await say(i, 'Every registered group can put up to 8 posters in the club; Premium gets 32, plus an entrance billboard and a photo-wall backdrop. Use `/poster submit` (one image) or `/poster batch` (up to eight). Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. Staff review everything before it goes live. `/ws-help` has the details.');
+        return true;
+      case 'cy': case 'cn': {
+        await i.deferUpdate();
+        const r = await sitePost<{ status: string; title: string }>(d.site, '/api/bot/collab', { action: action === 'cy' ? 'accept' : 'decline', actor: i.user.id, collabId: arg });
+        const line = !r.ok ? `⚠️ ${r.error}` : r.data.status === 'confirmed' ? '✅ **Accepted. The collab is on.** You both earn the night\'s heat.' :
+          r.data.status === 'declined' ? 'Declined. They\'ve been told.' : '✅ Accepted. Waiting on the other groups.';
+        await i.editReply({ content: `${i.message.content}\n\n${line}`, components: r.ok ? [] : i.message.components });
+        return true;
+      }
+      case 'appok': case 'appno': {
+        if (!d.isAdmin(i)) { await say(i, 'Only Wreckshop admins can decide applications.'); return true; }
+        if (action === 'appno') {
+          await i.showModal(new ModalBuilder().setCustomId(`fbt:appnom:${arg}`).setTitle('Decline application').addLabelComponents(
+            textInput('note', 'Note for the applicant (optional)', TextInputStyle.Paragraph, { required: false, max: 500, placeholder: 'What would help them next time' })));
+          return true;
+        }
+        await i.deferUpdate();
+        await decideApplication(i, Number(arg), true);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function decideApplication(i: ButtonInteraction | ModalSubmitInteraction, id: number, approve: boolean, note?: string) {
+    const r = await sitePost<{ groupId: number; level: string; applicant: string; groupName: string }>(d.site, '/api/bot/decision', { applicationId: id, approve, by: i.user.id, note });
+    if (!r.ok) { await i.followUp({ content: r.error, flags: EPHEMERAL }); return; }
+    const { groupId, level, applicant, groupName } = r.data;
+    if (approve) {
+      if (!store.group(groupId)) { await i.followUp({ content: `Group #${groupId} no longer exists here.`, flags: EPHEMERAL }); return; }
+      if (level === 'headliner') store.setHeadliner(groupId, true);
+      else store.setTier(groupId, 'premium');
+      scheduleSync();
+    }
+    const verdict = approve ? `**APPROVED** by <@${i.user.id}>` : `**DECLINED** by <@${i.user.id}>${note ? ` · "${note}"` : ''}`;
+    if (i.message) await i.message.edit({ content: `${i.message.content ?? ''}\n${verdict}`.trim(), components: [] }).catch(() => undefined);
+    await d.auditLog(i.guild, `Application #${id} (${groupName}, ${level}) ${approve ? 'approved' : 'declined'} by <@${i.user.id}>.`);
+    const user = await d.client.users.fetch(applicant).catch(() => undefined);
+    const label = level === 'headliner' ? 'Headliner' : 'Premium';
+    const g = store.group(groupId);
+    const dm = approve
+      ? `🎉 **${groupName} is now ${label}!** Your resort on the Strip just got its upgrade.${level === 'premium' || level === 'headliner' ? ' You can now use 32 poster slots, `/billboard submit` and `/backdrop submit`.' : ''}${g && !g.vrchatUrl ? ' Add your VRChat group with `/group link` to show the Join Group button in the world.' : ''}`
+      : `Your ${label} application for **${groupName}** wasn't approved this time.${note ? `\nStaff note: ${note}` : ''}\nYou can apply again in 14 days. Keep hosting: consistent nights count the most.`;
+    await user?.send(dm).catch(() => undefined);
+  }
+
+  // ── Modals ───────────────────────────────────────────────────────────────────────────────
+  async function handleModal(i: ModalSubmitInteraction): Promise<boolean> {
+    const [prefix, action, arg] = i.customId.split(':');
+    if (prefix !== 'fbt') return false;
+    const v = (id: string) => { try { return i.fields.getTextInputValue(id).trim(); } catch { return ''; } };
+    if (action === 'regm') {
+      const name = validateGroupName(v('name'));
+      const vrc = v('vrc') || undefined;
+      const g = store.registerGroup(name, 'standard', vrc, i.user.id);
+      store.setSetting(`representative-name-${i.user.id}`, '@' + i.user.username);
+      store.queuePublish(g.id);
+      scheduleSync();
+      await d.auditLog(i.guild ?? d.client.guilds.cache.get(d.guildId) ?? null, `Group #${g.id} ${g.name} registered by <@${i.user.id}> from the Start Here panel.`);
+      const status = verifyStatus(g);
+      await i.reply({ content: `🎉 **${g.name}** is registered as group #${g.id}.\n\n${status.content}`, components: status.components, flags: EPHEMERAL, allowedMentions: { parse: [] } });
+      return true;
+    }
+    if (action === 'linkm') {
+      const g = groupOf(i.user.id);
+      if (!g) throw new Error('You don\'t represent a group yet.');
+      store.setUrl(g.id, normalizeGroupLink(v('vrc')));
+      scheduleSync();
+      const status = verifyStatus(store.group(g.id)!);
+      if (i.isFromMessage()) await i.update(status); else await i.reply({ ...status, flags: EPHEMERAL });
+      return true;
+    }
+    if (action === 'applym') {
+      const g = groupOf(i.user.id);
+      if (!g) throw new Error('You don\'t represent a group yet.');
+      await i.deferReply({ flags: EPHEMERAL });
+      scheduleSync(0);
+      await new Promise(r => setTimeout(r, 1500)); // let the website see the latest verification first
+      const r = await sitePost(d.site, '/api/bot/apply', {
+        actor: i.user.id, group: g.id, level: arg, about: v('about'), schedule: v('schedule'), crowd: v('crowd'), links: v('links'),
+      });
+      await i.editReply(r.ok ? 'Application sent. Staff review it here in Discord, and I\'ll DM you the answer.' : `⚠️ ${r.error}`);
+      return true;
+    }
+    if (action === 'appnom') {
+      if (!d.isAdmin(i)) throw new Error('Only Wreckshop admins can decide applications.');
+      await i.deferUpdate();
+      await decideApplication(i, Number(arg), false, v('note') || undefined);
+      return true;
+    }
+    return false;
+  }
+
+  // ── Slash commands ───────────────────────────────────────────────────────────────────────
+  const tzOption = (o: import('discord.js').SlashCommandStringOption) =>
+    o.setName('timezone').setDescription('Your time zone (remembered after the first time)').addChoices(...TIMEZONES);
+  const commands = [
+    new SlashCommandBuilder().setName('start').setDescription('New here? Register, get verified, host and collab'),
+    new SlashCommandBuilder().setName('apply').setDescription('Apply for Premium or Headliner')
+      .addStringOption(o => o.setName('level').setDescription('What you are applying for').setRequired(true)
+        .addChoices({ name: 'Premium', value: 'premium' }, { name: 'Headliner', value: 'headliner' })),
+    new SlashCommandBuilder().setName('event').setDescription('Your group\'s events on the Strip')
+      .addSubcommand(s => s.setName('create').setDescription('Post an event (announced here and on the Strip)')
+        .addStringOption(o => o.setName('title').setDescription('Show name').setRequired(true).setMaxLength(60))
+        .addStringOption(o => o.setName('date').setDescription('friday, tomorrow, 10/17 …').setRequired(true).setMaxLength(20))
+        .addStringOption(o => o.setName('time').setDescription('9pm, 21:00 …').setRequired(true).setMaxLength(10))
+        .addIntegerOption(o => o.setName('hours').setDescription('How long (default 4)').setMinValue(1).setMaxValue(12))
+        .addStringOption(tzOption)
+        .addIntegerOption(o => o.setName('partner').setDescription('Collab partner group (optional)').setAutocomplete(true))
+        .addStringOption(o => o.setName('description').setDescription('DJs, dress code, who\'s dancing').setMaxLength(500)))
+      .addSubcommand(s => s.setName('list').setDescription('Your upcoming events'))
+      .addSubcommand(s => s.setName('cancel').setDescription('Cancel one of your events')
+        .addStringOption(o => o.setName('event').setDescription('Which event').setRequired(true).setAutocomplete(true))),
+    new SlashCommandBuilder().setName('collab').setDescription('Team up with another group: both earn the night\'s heat')
+      .addSubcommand(s => s.setName('start').setDescription('Ask another group to collab (before the night or up to 24h after)')
+        .addIntegerOption(o => o.setName('partner').setDescription('Partner group').setRequired(true).setAutocomplete(true))
+        .addStringOption(o => o.setName('date').setDescription('friday, tomorrow, 10/17 …').setRequired(true).setMaxLength(20))
+        .addStringOption(o => o.setName('time').setDescription('9pm, 21:00 …').setRequired(true).setMaxLength(10))
+        .addIntegerOption(o => o.setName('hours').setDescription('How long (default 4)').setMinValue(1).setMaxValue(12))
+        .addStringOption(tzOption)
+        .addStringOption(o => o.setName('title').setDescription('Show name (optional)').setMaxLength(60)))
+      .addSubcommand(s => s.setName('list').setDescription('Your collabs, with Accept buttons for requests')),
+  ];
+
+  function resolveWhen(i: ChatInputCommandInteraction): { start: number; end: number } | string {
+    const tz = i.options.getString('timezone') ?? tzOf(i.user.id);
+    if (!tz) return 'Pick your time zone once with the `timezone` option. I\'ll remember it after that.';
+    store.setSetting(`fbt-tz-${i.user.id}`, tz);
+    const at = parseWhen(i.options.getString('date', true), i.options.getString('time', true), tz);
+    if (typeof at === 'string') return at;
+    return { start: at, end: at + (i.options.getInteger('hours') ?? 4) * 3600_000 };
+  }
+
+  async function handleCommand(i: ChatInputCommandInteraction): Promise<boolean> {
+    if (i.commandName === 'start') {
+      const g = groupOf(i.user.id);
+      await i.reply({ embeds: [startEmbed()], components: startRows(), flags: EPHEMERAL });
+      if (g) await i.followUp({ ...verifyStatus(g), flags: EPHEMERAL });
+      return true;
+    }
+    if (i.commandName === 'apply') {
+      const g = groupOf(i.user.id);
+      if (!g) { await say(i, 'Register your group first with `/start` → Register my group.'); return true; }
+      if (!isVerified(g)) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
+      await i.showModal(applyModal(i.options.getString('level', true) as 'premium' | 'headliner'));
+      return true;
+    }
+    if (i.commandName === 'event') {
+      const sub = i.options.getSubcommand();
+      const g = groupOf(i.user.id);
+      if (!g) { await say(i, 'Register your group first with `/start` → Register my group.'); return true; }
+      if (sub === 'create') {
+        const when = resolveWhen(i);
+        if (typeof when === 'string') { await say(i, when); return true; }
+        await i.deferReply({ flags: EPHEMERAL });
+        const partner = i.options.getInteger('partner');
+        const r = await sitePost<{ id: string; collabId: string | null; collabError: string | null }>(d.site, '/api/bot/event', {
+          action: 'create', actor: i.user.id, group: g.id, title: i.options.getString('title', true),
+          description: i.options.getString('description') ?? '', start: new Date(when.start).toISOString(), end: new Date(when.end).toISOString(),
+          partners: partner ? [partner] : [],
+        });
+        await i.editReply(!r.ok ? `⚠️ ${r.error}` : `Posted for ${discordTime(when.start)}. It'll be announced in the events channel and is on the Strip's Coming Up view.${
+          r.data.collabError ? `\nThe collab request didn't go out: ${r.data.collabError}` : r.data.collabId ? '\nYour partner has been asked to confirm the collab.' : ''}`);
+        return true;
+      }
+      if (sub === 'list') {
+        const r = await sitePost<{ events: { id: string; title: string; startsAt: string; group: string }[] }>(d.site, '/api/bot/event', { action: 'list', actor: i.user.id });
+        await say(i, !r.ok ? `⚠️ ${r.error}` : r.data.events.length ? r.data.events.map(e => `• **${e.title}** · ${discordTime(Date.parse(e.startsAt))}`).join('\n') : 'No upcoming events. Post one with `/event create`.');
+        return true;
+      }
+      if (sub === 'cancel') {
+        const r = await sitePost(d.site, '/api/bot/event', { action: 'cancel', actor: i.user.id, eventId: i.options.getString('event', true) });
+        await say(i, r.ok ? 'Event cancelled. It\'s off the Strip and the events channel has been told.' : `⚠️ ${r.error}`);
+        return true;
+      }
+    }
+    if (i.commandName === 'collab') {
+      const sub = i.options.getSubcommand();
+      const g = groupOf(i.user.id);
+      if (!g) { await say(i, 'Register your group first with `/start` → Register my group.'); return true; }
+      if (sub === 'start') {
+        if (!isVerified(g)) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
+        const when = resolveWhen(i);
+        if (typeof when === 'string') { await say(i, when); return true; }
+        await i.deferReply({ flags: EPHEMERAL });
+        const r = await sitePost(d.site, '/api/bot/collab', {
+          action: 'propose', actor: i.user.id, group: g.id, partners: [i.options.getInteger('partner', true)],
+          start: new Date(when.start).toISOString(), end: new Date(when.end).toISOString(), title: i.options.getString('title') ?? '',
+        });
+        await i.editReply(r.ok ? `Collab request sent for ${discordTime(when.start)}. Their representatives get a DM with Accept and Decline buttons.` : `⚠️ ${r.error}`);
+        return true;
+      }
+      if (sub === 'list') {
+        await i.deferReply({ flags: EPHEMERAL });
+        const r = await sitePost<{ items: { id: string; status: string; title: string; windowStart: string; host: string; partners: string[]; needsMyAnswer: boolean }[] }>(d.site, '/api/bot/collab', { action: 'list', actor: i.user.id });
+        if (!r.ok) { await i.editReply(`⚠️ ${r.error}`); return true; }
+        const items = r.data.items.slice(0, 10);
+        if (!items.length) { await i.editReply('No collabs yet. Start one with `/collab start`.'); return true; }
+        const pending = items.filter(c => c.needsMyAnswer).slice(0, 2);
+        await i.editReply({
+          content: items.map(c => `• **${[c.host, ...c.partners].join(' × ')}** · ${c.title || 'Collab night'} · ${discordTime(Date.parse(c.windowStart), 'f')} · ${c.status}`).join('\n'),
+          components: pending.map(c => new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(`fbt:cy:${c.id}`).setLabel(`Accept ${c.host}`.slice(0, 80)).setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`fbt:cn:${c.id}`).setLabel('Decline').setStyle(ButtonStyle.Danger))),
+        });
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function handleAutocomplete(i: AutocompleteInteraction): Promise<boolean> {
+    if (!['event', 'collab'].includes(i.commandName)) return false;
+    const focused = i.options.getFocused(true);
+    const q = String(focused.value).toLowerCase();
+    if (focused.name === 'partner') {
+      const w = await whois(i.user.id);
+      await i.respond(w.partners.filter(p => p.name.toLowerCase().includes(q)).slice(0, 25).map(p => ({ name: p.name.slice(0, 100), value: p.id })));
+    } else if (focused.name === 'event') {
+      const r = await sitePost<{ events: { id: string; title: string; startsAt: string }[] }>(d.site, '/api/bot/event', { action: 'list', actor: i.user.id });
+      const list = r.ok ? r.data.events : [];
+      await i.respond(list.filter(e => e.title.toLowerCase().includes(q)).slice(0, 25).map(e => ({
+        name: `${e.title} · ${new Date(e.startsAt).toUTCString().slice(0, 22)} UTC`.slice(0, 100), value: e.id })));
+    } else await i.respond([]);
+    return true;
+  }
+
+  // ── Outbox: things the website asks the bot to do ────────────────────────────────────────
+  async function dm(userId: string, payload: Parameters<User['send']>[0]): Promise<boolean> {
+    const user = await d.client.users.fetch(userId).catch(() => undefined);
+    return Boolean(user && await user.send(payload).catch(() => undefined));
+  }
+
+  async function deliver(item: OutboxItem): Promise<void> {
+    const p = item.payload as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const guild = d.client.guilds.cache.get(d.guildId) ?? null;
+    const events = channel('fbt_events_channel');
+    switch (item.kind) {
+      case 'collab.request': {
+        const when = Date.parse(p.start);
+        for (const partner of p.partners as { id: number; name: string; reps: string[] }[]) {
+          const content = `🤝 **${p.host.name}** wants to collab with **${partner.name}**${p.title ? ` on **${p.title}**` : ''} · ${discordTime(when)} (${discordTime(when, 'R')}).\nIf you say yes, both groups earn that night's heat in full, plus a collab bonus.`;
+          const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(`fbt:cy:${p.collabId}`).setLabel('Accept').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`fbt:cn:${p.collabId}`).setLabel('Decline').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setLabel('See collabs').setStyle(ButtonStyle.Link).setURL(url('/collabs')));
+          let reached = false;
+          for (const rep of partner.reps) reached = (await dm(rep, { content, components: [row] })) || reached;
+          if (!reached && events) await events.send({ content: `${partner.reps.map(r => `<@${r}>`).join(' ')} ${content}`, components: [row], allowedMentions: { users: partner.reps } });
+        }
+        return;
+      }
+      case 'collab.answered': {
+        const host = store.group(Number(p.hostId));
+        const reps = host ? store.representatives(host.id) : [];
+        const text = p.status === 'confirmed' ? `✅ Your collab **${p.title}** is confirmed. Both groups earn the night's heat.` : `Your collab request **${p.title}** was declined.`;
+        for (const r of reps) await dm(r, text);
+        if (p.status === 'confirmed' && events && Array.isArray(p.names)) await events.send(`🤝 **${(p.names as string[]).join(' × ')}** are teaming up: **${p.title}**.`);
+        return;
+      }
+      case 'event.created': {
+        const host = store.group(Number(p.groupId));
+        const headliner = host?.tier === 'premium' && host.level === 'headliner';
+        const start = Date.parse(p.start), end = Date.parse(p.end);
+        if (events) {
+          const embed = new EmbedBuilder().setColor(headliner ? GOLD : host?.tier === 'premium' ? EMERALD : BRONZE)
+            .setTitle(p.title).setURL(url(`/v/${p.groupSlug}`))
+            .setDescription(`${headliner ? '👑 **Headliner** · ' : ''}**${p.groupName}** · ${discordTime(start)} (${discordTime(start, 'R')})${p.description ? `\n\n${p.description}` : ''}`)
+            .setFooter({ text: 'FBT Social · RSVP on the Strip' });
+          await events.send({ embeds: [embed], components: [linkRow(['RSVP on the Strip', url(`/v/${p.groupSlug}`)])] });
+        }
+        if (guild?.members.me?.permissions.has(PermissionFlagsBits.ManageEvents) && start > Date.now() + 60_000) {
+          const ev = await guild.scheduledEvents.create({
+            name: `${p.title} · ${p.groupName}`.slice(0, 100), scheduledStartTime: new Date(start), scheduledEndTime: new Date(end),
+            privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly, entityType: GuildScheduledEventEntityType.External,
+            entityMetadata: { location: 'FBT Social · VRChat' }, description: (p.description || `Hosted by ${p.groupName}. RSVP: ${url(`/v/${p.groupSlug}`)}`).slice(0, 1000),
+          }).catch(e => { console.error('Scheduled event failed:', e.message); return undefined; });
+          if (ev) await sitePost(d.site, '/api/bot/event', { action: 'linked', eventId: p.eventId, discordEventId: ev.id });
+        }
+        return;
+      }
+      case 'event.cancelled': {
+        if (p.discordEventId && guild) await guild.scheduledEvents.delete(p.discordEventId).catch(() => undefined);
+        if (events) await events.send(`**${p.title}** by ${p.groupName} has been cancelled.`);
+        return;
+      }
+      case 'application.created': {
+        const approvals = store.setting('approval_channel');
+        const ch = approvals && guild ? guild.channels.cache.get(approvals) : undefined;
+        if (ch?.type !== ChannelType.GuildText) throw new Error('Approval channel is not configured.');
+        const s = p.stats ?? {};
+        const a = p.answers ?? {};
+        const label = p.level === 'headliner' ? 'Headliner' : 'Premium';
+        const embed = new EmbedBuilder().setColor(p.level === 'headliner' ? GOLD : EMERALD)
+          .setTitle(`${label} application · ${p.groupName}`).setURL(url(`/v/${p.groupSlug}`))
+          .setDescription(String(a.about ?? '').slice(0, 1500))
+          .addFields(
+            { name: 'Applicant', value: `<@${p.applicant}>`, inline: true },
+            { name: 'Now', value: String(p.current), inline: true },
+            { name: 'Season heat', value: `${s.season_points ?? 0}${s.season_rank ? ` (#${s.season_rank})` : ''}`, inline: true },
+            { name: 'Nights, last 30 days', value: String(s.nights_30d ?? 0), inline: true },
+            { name: 'Best night', value: `${s.best_night ?? 0} heat`, inline: true },
+            { name: 'Events · collabs', value: `${s.events_30d ?? 0} · ${s.collabs ?? 0}`, inline: true },
+            { name: 'Hosts', value: String(a.schedule ?? '–').slice(0, 200), inline: true },
+            { name: 'Typical crowd', value: String(a.crowd ?? '–').slice(0, 100), inline: true },
+            { name: 'Links', value: String(a.links || '–').slice(0, 300), inline: true });
+        await (ch as TextChannel).send({
+          content: `**Application #${p.applicationId}**`, embeds: [embed], allowedMentions: { parse: [] },
+          components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(`fbt:appok:${p.applicationId}`).setLabel(`Approve ${label}`).setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`fbt:appno:${p.applicationId}`).setLabel('Decline').setStyle(ButtonStyle.Danger))],
+        });
+        return;
+      }
+      default:
+        console.warn('Unknown outbox item', item.kind);
+    }
+  }
+
+  let polling = false;
+  let pendingAck: number[] = [], pendingFailed: number[] = [];
+  async function pollOutbox(): Promise<void> {
+    if (polling || !siteEnabled(d.site)) return;
+    polling = true;
+    try {
+      const r = await sitePost<{ items: OutboxItem[] }>(d.site, '/api/bot/outbox', { ack: pendingAck, failed: pendingFailed });
+      if (!r.ok) return;
+      pendingAck = []; pendingFailed = [];
+      for (const item of r.data.items) {
+        try { await deliver(item); pendingAck.push(item.id); }
+        catch (e) { console.error(`Outbox item ${item.id} (${item.kind}) failed:`, e); pendingFailed.push(item.id); }
+      }
+    } finally { polling = false; }
+  }
+
+  function startLoops(): void {
+    if (!siteEnabled(d.site)) { console.log('FBT website link not configured (FBT_SITE_URL / FBT_BOT_SECRET); website features are off.'); return; }
+    setInterval(() => void pollOutbox(), 8_000);
+    setInterval(() => scheduleSync(0), 3 * 60_000);
+    setInterval(() => void sitePost(d.site, '/api/cron/rollup', {}, 60_000), 10 * 60_000);
+  }
+
+  return { commands, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver };
+}
