@@ -87,7 +87,8 @@ export function statusLabel(g: Pick<Group, 'tier' | 'level' | 'vrchatUrl' | 'agr
  * The group list the website mirrors. Group #0 (the house default) is included but never shown.
  * `staff` (Discord ids of server managers and the admin role) unlocks the website's staff pages.
  */
-export function syncPayload(store: Store, staff?: string[], names?: Map<string, string>, verifiedUsers?: Set<string>) {
+export interface People { members: string[]; verified: string[] }
+export function syncPayload(store: Store, staff?: string[], names?: Map<string, string>, verifiedUsers?: Set<string>, people?: People) {
   const reps = store.db.prepare('SELECT group_id AS g, user_id AS u FROM representatives').all() as { g: number; u: string }[];
   const byGroup = new Map<number, string[]>();
   for (const r of reps) byGroup.set(r.g, [...(byGroup.get(r.g) ?? []), r.u]);
@@ -103,11 +104,14 @@ export function syncPayload(store: Store, staff?: string[], names?: Map<string, 
       art: art.get(g.id) ?? { posters: [], billboard: false, backdrop: false },
     })),
     ...(staff ? { staff: [...new Set(staff)].filter(u => /^\d{5,25}$/.test(u)).slice(0, 200) } : {}),
+    // Who is in the Discord server and who has the Verified role: the website uses it to guide
+    // newcomers (join → verify → register) and to let verified members register a club there.
+    ...(people ? { people: { members: people.members.slice(0, 20000), verified: people.verified.slice(0, 20000) } } : {}),
   };
 }
 
-export async function syncGroups(store: Store, c: SiteConfig, staff?: string[], names?: Map<string, string>, verifiedUsers?: Set<string>): Promise<SiteResult<{ saved: number; hidden: number }>> {
-  return sitePost(c, '/api/bot/groups', syncPayload(store, staff, names, verifiedUsers), 30_000);
+export async function syncGroups(store: Store, c: SiteConfig, staff?: string[], names?: Map<string, string>, verifiedUsers?: Set<string>, people?: People): Promise<SiteResult<{ saved: number; hidden: number }>> {
+  return sitePost(c, '/api/bot/groups', syncPayload(store, staff, names, verifiedUsers, people), 30_000);
 }
 
 export interface OutboxItem { id: number; kind: string; payload: Record<string, unknown>; attempts: number }

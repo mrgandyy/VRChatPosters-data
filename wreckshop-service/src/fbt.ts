@@ -158,7 +158,12 @@ export function createFbt(d: FbtDeps) {
     if (!siteEnabled(d.site)) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(async () => {
-      const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined), memberNames(), currentVerified());
+      const guild = d.client.guilds.cache.get(d.guildId);
+      const verified = currentVerified();
+      // Only send the member list once it's complete (the member scan fetches everyone).
+      const people = guild && scan && guild.members.cache.size >= Math.min(guild.memberCount, 20000) * 0.95
+        ? { members: [...guild.members.cache.keys()], verified: [...verified] } : undefined;
+      const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined), memberNames(), verified, people);
       await syncTierRoles().catch((e) => console.error('Tier role sync failed:', e));
       if (!r.ok) console.error('Website group sync failed:', r.error);
     }, delayMs);
@@ -810,6 +815,24 @@ export function createFbt(d: FbtDeps) {
         scheduleSync();
         return;
       }
+      case 'club.register': {
+        // A verified member registered a club on the website (same as the Start Here button).
+        const user = String(p.user);
+        let g: Group;
+        try {
+          g = store.registerGroup(String(p.name), 'standard', p.vrchat ? String(p.vrchat) : undefined, user);
+        } catch (e) {
+          await sitePost(d.site, '/api/bot/club-register', { requestId: p.requestId, ok: false, error: (e as Error).message.slice(0, 300) });
+          return;
+        }
+        if (p.userName) store.setSetting(`representative-name-${user}`, '@' + String(p.userName));
+        store.queuePublish(g.id);
+        await d.auditLog(guild, `Group #${g.id} ${g.name} registered by <@${user}> on the website.`);
+        await sitePost(d.site, '/api/bot/club-register', { requestId: p.requestId, ok: true, groupId: g.id });
+        await dm(user, `🎉 **${g.name}** is registered on FBT Social (club #${g.id}). Your door code for the world is \`${g.code}\`.\nNext: open **My dashboard** to get your nights counted and make it yours: ${url('/me')}`);
+        scheduleSync(0);
+        return;
+      }
       case 'team.joined': {
         // Someone accepted a club's invite link on the website (the bot added them as a rep just before).
         const groupId = Number(p.groupId);
@@ -855,7 +878,7 @@ export function createFbt(d: FbtDeps) {
         console.log(`Channels (${channels.length}):\n` + channels.filter(c => c.kind !== 'category').sort((a, b) => (a.parentName ?? '').localeCompare(b.parentName ?? '') || a.position - b.position)
           .map(c => `  ${c.parentName ?? '(none)'} › ${c.kind === 'voice' ? '🔊' : '#'}${c.name}  last:${day(c.lastMessageAt)}${c.protected ? `  [bot:${c.protected}]` : ''}${c.everyoneCanView ? '' : '  private'}`).join('\n'));
       }
-      void sitePost(d.site, '/api/bot/channels', { channels }, 30_000)
+      void sitePost(d.site, '/api/bot/channels', { channels, guildId: d.guildId }, 30_000)
         .then(r => { if (!r.ok) console.error('Channel list sync failed:', r.error); });
     }, delayMs);
   }
