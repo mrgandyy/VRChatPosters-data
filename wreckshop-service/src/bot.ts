@@ -507,6 +507,7 @@ const fbt = createFbt({
   publicUrl: process.env.FBT_PUBLIC_URL ?? process.env.FBT_SITE_URL ?? 'https://dsc.gg/wreckshop',
   welcome, isAdmin: admin, auditLog,
 });
+for (const ev of ['channelCreate', 'channelDelete', 'channelUpdate'] as const) client.on(ev, () => fbt.scheduleChannels());
 client.on('guildMemberAdd', member => { void fbt.onMemberAdd(member).catch(error => console.error('Welcome failed:',error)); });
 client.on('interactionCreate', async interaction => {
   try {

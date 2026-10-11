@@ -15,6 +15,7 @@ import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
+import { channelInventory, deleteChannel, postAnnouncement } from './fbt-discord.js';
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
@@ -199,14 +200,16 @@ export function createFbt(d: FbtDeps) {
   function startEmbed() {
     return new EmbedBuilder().setColor(ROSE).setTitle('Welcome to FBT Social')
       .setDescription([
-        'Any group can host at FBT Social. Every group gets a resort on **The Strip**, and the bigger your crowd, the brighter it burns.',
+        'Any club can host at FBT Social. Every club gets its own building on **The Strip**, and the bigger your crowd, the brighter it burns.',
         '',
-        '**1 · Register your group:** free, one minute.',
-        '**2 · Get verified:** link your VRChat group and accept the hosting rules. Unlocks collabs.',
-        '**3 · Host a night:** post your event; it gets announced here and lit up on the Strip.',
-        '**4 · Collab:** team up with another group and you both earn the night\'s heat, plus a bonus.',
-        '**5 · Premium or Headliner:** apply any time; staff review it here.',
+        '**1 · Get the Verified role:** run our verify bot. Verified members can register a club and host.',
+        '**2 · Register your club:** free, one minute. You get a club number and a door code for the world.',
+        '**3 · Make it yours:** posters, logo, banner, gallery and your colour, all on **My club** at fbtsocial.com.',
+        '**4 · Host a night:** post it and it\'s announced here and lit up on the Strip. Crowds earn heat for the season.',
+        '**5 · Collab:** team up with another club and you both earn the night\'s heat, plus a bonus.',
+        '**6 · Premium or Headliner:** apply any time. Premium clubs run **age-verified (18+) rooms** and let our tracker **fbtheat** into their VRChat group.',
         '',
+        '**Season 1 · Founders** runs Oct 12–31: every club that earns heat keeps a **Founding Venue** badge for good.',
         'Just here to party? Find tonight\'s nights on the Strip.',
       ].join('\n'))
       .setURL(url('/start'));
@@ -222,6 +225,10 @@ export function createFbt(d: FbtDeps) {
         new ButtonBuilder().setCustomId('fbt:collab').setLabel('Start a collab').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('fbt:posters').setLabel('Posters & billboards').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setLabel('The Strip').setStyle(ButtonStyle.Link).setURL(url('/'))),
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setLabel('My club: customize').setStyle(ButtonStyle.Link).setURL(url('/manage')),
+        new ButtonBuilder().setLabel('Leaderboard').setStyle(ButtonStyle.Link).setURL(url('/leaderboard')),
+        new ButtonBuilder().setLabel('Dancers & DJs').setStyle(ButtonStyle.Link).setURL(url('/join'))),
     ];
   }
 
@@ -802,9 +809,35 @@ export function createFbt(d: FbtDeps) {
         scheduleSync();
         return;
       }
+      case 'discord.channel.delete': {
+        if (!guild) throw new Error('The server isn\'t available right now.');
+        const line = await deleteChannel(guild, store, String(p.channelId), String(p.name), String(p.by));
+        await d.auditLog(guild, `🧹 ${line} by <@${p.by}> from the Control room.`);
+        scheduleChannels(2000);
+        return;
+      }
+      case 'discord.announce': {
+        if (!guild) throw new Error('The server isn\'t available right now.');
+        await postAnnouncement(guild, { channelId: String(p.channelId), title: String(p.title), body: String(p.body), everyone: Boolean(p.everyone),
+          links: Array.isArray(p.links) ? p.links : [], image: p.image ? String(p.image) : null });
+        await d.auditLog(guild, `📣 Announcement "${String(p.title).slice(0, 80)}" posted in <#${p.channelId}> by <@${p.by}> from the Control room.`);
+        return;
+      }
       default:
         console.warn('Unknown outbox item', item.kind);
     }
+  }
+
+  // ── Channel list for the Control room ───────────────────────────────────────────────────
+  let channelTimer: NodeJS.Timeout | undefined;
+  function scheduleChannels(delayMs = 10_000) {
+    if (!siteEnabled(d.site)) return;
+    clearTimeout(channelTimer);
+    channelTimer = setTimeout(() => {
+      const guild = d.client.guilds.cache.get(d.guildId);
+      if (guild) void sitePost(d.site, '/api/bot/channels', { channels: channelInventory(guild, store) }, 30_000)
+        .then(r => { if (!r.ok) console.error('Channel list sync failed:', r.error); });
+    }, delayMs);
   }
 
   let polling = false;
@@ -821,7 +854,8 @@ export function createFbt(d: FbtDeps) {
         catch (e) {
           console.error(`Outbox item ${item.id} (${item.kind}) failed:`, e);
           // Staff actions fail on bad input (taken name, unknown user): retrying won't help.
-          pendingFailed.push({ id: item.id, error: e instanceof Error ? e.message.slice(0, 300) : 'Failed.', permanent: item.kind.startsWith('admin.') });
+          pendingFailed.push({ id: item.id, error: e instanceof Error ? e.message.slice(0, 300) : 'Failed.',
+            permanent: item.kind.startsWith('admin.') || (e as { permanent?: boolean }).permanent === true });
         }
       }
     } finally { polling = false; }
@@ -831,8 +865,10 @@ export function createFbt(d: FbtDeps) {
     if (!siteEnabled(d.site)) { console.log('FBT website link not configured (FBT_SITE_URL / FBT_BOT_SECRET); website features are off.'); return; }
     setInterval(() => void pollOutbox(), 8_000);
     setInterval(() => scheduleSync(0), 3 * 60_000);
+    scheduleChannels(15_000);
+    setInterval(() => scheduleChannels(0), 15 * 60_000);
     setInterval(() => void sitePost(d.site, '/api/cron/rollup', {}, 60_000), 10 * 60_000);
   }
 
-  return { commands, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver, artDecided };
+  return { commands, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver, artDecided, scheduleChannels };
 }
