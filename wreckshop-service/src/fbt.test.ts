@@ -63,7 +63,8 @@ test('sync payload mirrors groups, reps and verification for the website', () =>
     const p = syncPayload(s);
     assert.equal(p.full, true);
     const w = p.groups.find(x => x.id === g.id)!;
-    assert.deepEqual({ ...w }, { id: g.id, name: 'WAYPOINT', tier: 'standard', headliner: false, verified: true, enabled: true, vrchatGroupId: GRP, reps: ['100000000000000001'] });
+    assert.deepEqual({ ...w }, { id: g.id, name: 'WAYPOINT', tier: 'standard', headliner: false, verified: true, enabled: true, vrchatGroupId: GRP, reps: ['100000000000000001'], code: s.group(g.id)!.code, repNames: {} });
+    assert.deepEqual(syncPayload(s, undefined, new Map([['100000000000000001', 'Alice']])).groups.find(x => x.id === g.id)!.repNames, { '100000000000000001': 'Alice' });
     assert.equal(vrcGroupId(null), null);
     assert.equal('staff' in p, false, 'older payload shape when no staff list');
     assert.deepEqual(syncPayload(s, ['100000000000000009', '100000000000000009', 'nope']).staff, ['100000000000000009'], 'staff deduped and checked');

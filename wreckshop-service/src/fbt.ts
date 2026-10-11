@@ -9,7 +9,8 @@ import {
 } from 'discord.js';
 import type { Store } from './db.js';
 import { normalizeGroupLink, validateGroupName } from './group-link.js';
-import { isVerified, sitePost, siteEnabled, statusLabel, syncGroups, type OutboxItem, type SiteConfig } from './fbt-site.js';
+import { isVerified, sitePost, siteEnabled, statusLabel, syncGroups, type OutboxFailure, type OutboxItem, type SiteConfig } from './fbt-site.js';
+import { applyAdmin, setLevel, type AdminAction } from './fbt-admin.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import type { Group } from './types.js';
 
@@ -60,11 +61,33 @@ export function createFbt(d: FbtDeps) {
     staffCache = { at: Date.now(), ids: [...ids] };
     return staffCache.ids;
   }
+  /** Display names of representatives the bot can see, so the website shows names, not ids. */
+  function memberNames(): Map<string, string> {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const names = new Map<string, string>();
+    for (const g of store.groups()) for (const id of store.representatives(g.id)) {
+      const name = guild?.members.cache.get(id)?.displayName ?? d.client.users.cache.get(id)?.username;
+      if (name) names.set(id, name);
+    }
+    return names;
+  }
+  /** "@name", a name or an id → a Discord id of someone in the server. */
+  async function resolveUser(q: string): Promise<string> {
+    const text = q.trim().replace(/^<@!?(\d+)>$/, '$1').replace(/^@/, '');
+    if (/^\d{5,25}$/.test(text)) return text;
+    const guild = d.client.guilds.cache.get(d.guildId);
+    if (!guild || !text) throw new Error('Give their Discord id or exact username.');
+    const found = await guild.members.search({ query: text, limit: 5 });
+    const exact = [...found.values()].filter(m => [m.user.username, m.displayName, m.user.globalName].some(n => n?.toLowerCase() === text.toLowerCase()));
+    const pick = exact.length === 1 ? exact[0] : found.size === 1 ? found.first() : undefined;
+    if (!pick) throw new Error(found.size ? `"${text}" matches more than one member. Use their exact username or id.` : `No member named "${text}" in the server.`);
+    return pick.id;
+  }
   function scheduleSync(delayMs = 4000) {
     if (!siteEnabled(d.site)) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(async () => {
-      const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined));
+      const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined), memberNames());
       if (!r.ok) console.error('Website group sync failed:', r.error);
     }, delayMs);
   }
@@ -311,8 +334,7 @@ export function createFbt(d: FbtDeps) {
     const { groupId, level, applicant, groupName } = r.data;
     if (approve) {
       if (!store.group(groupId)) { await i.followUp({ content: `Group #${groupId} no longer exists here.`, flags: EPHEMERAL }); return; }
-      if (level === 'headliner') store.setHeadliner(groupId, true);
-      else store.setTier(groupId, 'premium');
+      setLevel(store, groupId, level === 'headliner' ? 'headliner' : 'premium');
       scheduleSync();
     }
     const verdict = approve ? `**APPROVED** by <@${i.user.id}>` : `**DECLINED** by <@${i.user.id}>${note ? ` · "${note}"` : ''}`;
@@ -519,6 +541,24 @@ export function createFbt(d: FbtDeps) {
     const guild = d.client.guilds.cache.get(d.guildId) ?? null;
     const events = channel('fbt_events_channel');
     switch (item.kind) {
+      case 'admin.group': {
+        const r = await applyAdmin(store, p as AdminAction, resolveUser);
+        await d.auditLog(guild, `🛠️ ${r.summary} by <@${p.by}> on the website.`);
+        scheduleSync(0);
+        return;
+      }
+      case 'application.decided': {
+        const label = p.level === 'headliner' ? 'Headliner' : 'Premium';
+        await d.auditLog(guild, `Application #${p.applicationId} (${p.groupName}, ${label}) ${p.approve ? 'approved' : 'declined'} by <@${p.by}> on the website.`);
+        const approvals = store.setting('approval_channel');
+        const ch = approvals && guild ? guild.channels.cache.get(approvals) : undefined;
+        if (ch?.type === ChannelType.GuildText) await (ch as TextChannel).send({ content: `Application #${p.applicationId} · ${p.groupName} · ${p.approve ? '**APPROVED**' : '**DECLINED**'} by <@${p.by}> on the website${!p.approve && p.note ? ` · "${p.note}"` : ''}.`, allowedMentions: { parse: [] } }).catch(() => undefined);
+        const user = await d.client.users.fetch(String(p.applicant)).catch(() => undefined);
+        await user?.send(p.approve
+          ? `🎉 **${p.groupName} is now ${label}!** Your resort on the Strip just got its upgrade. You can now use all 32 poster spots, \`/billboard submit\` and \`/backdrop submit\`.`
+          : `Your ${label} application for **${p.groupName}** wasn't approved this time.${p.note ? `\nStaff note: ${p.note}` : ''}\nYou can apply again in 14 days. Keep hosting: consistent nights count the most.`).catch(() => undefined);
+        return;
+      }
       case 'collab.request': {
         const when = Date.parse(p.start);
         for (const partner of p.partners as { id: number; name: string; reps: string[] }[]) {
@@ -601,7 +641,7 @@ export function createFbt(d: FbtDeps) {
   }
 
   let polling = false;
-  let pendingAck: number[] = [], pendingFailed: number[] = [];
+  let pendingAck: number[] = [], pendingFailed: OutboxFailure[] = [];
   async function pollOutbox(): Promise<void> {
     if (polling || !siteEnabled(d.site)) return;
     polling = true;
@@ -611,7 +651,11 @@ export function createFbt(d: FbtDeps) {
       pendingAck = []; pendingFailed = [];
       for (const item of r.data.items) {
         try { await deliver(item); pendingAck.push(item.id); }
-        catch (e) { console.error(`Outbox item ${item.id} (${item.kind}) failed:`, e); pendingFailed.push(item.id); }
+        catch (e) {
+          console.error(`Outbox item ${item.id} (${item.kind}) failed:`, e);
+          // Staff actions fail on bad input (taken name, unknown user): retrying won't help.
+          pendingFailed.push({ id: item.id, error: e instanceof Error ? e.message.slice(0, 300) : 'Failed.', permanent: item.kind.startsWith('admin.') });
+        }
       }
     } finally { polling = false; }
   }

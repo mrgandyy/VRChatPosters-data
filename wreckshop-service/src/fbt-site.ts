@@ -47,7 +47,7 @@ export function statusLabel(g: Pick<Group, 'tier' | 'level' | 'vrchatUrl' | 'agr
  * The group list the website mirrors. Group #0 (the house default) is included but never shown.
  * `staff` (Discord ids of server managers and the admin role) unlocks the website's staff pages.
  */
-export function syncPayload(store: Store, staff?: string[]) {
+export function syncPayload(store: Store, staff?: string[], names?: Map<string, string>) {
   const reps = store.db.prepare('SELECT group_id AS g, user_id AS u FROM representatives').all() as { g: number; u: string }[];
   const byGroup = new Map<number, string[]>();
   for (const r of reps) byGroup.set(r.g, [...(byGroup.get(r.g) ?? []), r.u]);
@@ -57,13 +57,17 @@ export function syncPayload(store: Store, staff?: string[]) {
       id: g.id, name: g.name, tier: g.tier, headliner: g.tier === 'premium' && g.level === 'headliner',
       verified: isVerified(g), enabled: !!g.enabled, vrchatGroupId: vrcGroupId(g.vrchatUrl),
       reps: (byGroup.get(g.id) ?? []).filter(u => /^\d{5,25}$/.test(u)),
+      code: /^\d{8}$/.test(g.code) ? g.code : undefined,
+      repNames: Object.fromEntries((byGroup.get(g.id) ?? []).flatMap(u => names?.get(u) ? [[u, names.get(u)!.slice(0, 64)]] : [])),
     })),
     ...(staff ? { staff: [...new Set(staff)].filter(u => /^\d{5,25}$/.test(u)).slice(0, 200) } : {}),
   };
 }
 
-export async function syncGroups(store: Store, c: SiteConfig, staff?: string[]): Promise<SiteResult<{ saved: number; hidden: number }>> {
-  return sitePost(c, '/api/bot/groups', syncPayload(store, staff), 30_000);
+export async function syncGroups(store: Store, c: SiteConfig, staff?: string[], names?: Map<string, string>): Promise<SiteResult<{ saved: number; hidden: number }>> {
+  return sitePost(c, '/api/bot/groups', syncPayload(store, staff, names), 30_000);
 }
 
 export interface OutboxItem { id: number; kind: string; payload: Record<string, unknown>; attempts: number }
+/** A delivery failure reported back to the website. Permanent ones (bad input) aren't retried. */
+export interface OutboxFailure { id: number; error: string; permanent: boolean }

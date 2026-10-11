@@ -201,6 +201,24 @@ export class Store {
       this.queuePublish(0);
     })();
   }
+  /** Undo deleteGroup: back in the catalog and enabled. Representatives must be re-added. */
+  restoreGroup(id: number): void {
+    const row = this.db.prepare('SELECT deleted, vrchat_url AS url FROM groups WHERE id=?').get(id) as { deleted: number; url: string | null } | undefined;
+    if (!row || id === 0) throw new Error(`Group #${id} doesn't exist.`);
+    if (!row.deleted) throw new Error(`Group #${id} isn't removed.`);
+    if (row.url && this.groups().some(g => g.vrchatUrl === row.url)) throw new Error('Another active group already uses that VRChat group. Unlink it there first.');
+    this.db.prepare('UPDATE groups SET deleted=0, enabled=1 WHERE id=?').run(id);
+    this.queuePublish(id);
+    this.queuePublish(0);
+  }
+  /** A fresh random eight-digit access code. */
+  newCode(groupId: number): string {
+    let code = '';
+    do { code = randomInt(0, 100_000_000).toString().padStart(8, '0'); }
+    while (this.db.prepare('SELECT 1 FROM groups WHERE code=?').get(code));
+    this.setCode(groupId, code);
+    return code;
+  }
   cleanupDuplicates(): number {
     return this.db.transaction(() => {
       let removed=0;
