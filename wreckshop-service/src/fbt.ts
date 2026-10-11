@@ -39,11 +39,32 @@ export function createFbt(d: FbtDeps) {
 
   // ── Website sync ─────────────────────────────────────────────────────────────────────────
   let syncTimer: NodeJS.Timeout | undefined;
+  let staffCache: { at: number; ids: string[] } | undefined;
+  /** Server owner, members who can Manage Server, and the bot's admin role: staff on the website. */
+  async function staffIds(): Promise<string[] | undefined> {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    if (!guild) return staffCache?.ids;
+    if (staffCache && Date.now() - staffCache.at < 30 * 60_000) return staffCache.ids;
+    const adminRole = store.setting('admin_role');
+    const ids = new Set<string>([guild.ownerId]);
+    try {
+      // The full member list needs the Server Members intent, which is on while welcomes are on.
+      const members = d.welcome ? await guild.members.fetch() : guild.members.cache;
+      for (const m of members.values()) {
+        if (m.user.bot) continue;
+        if (m.permissions.has(PermissionFlagsBits.ManageGuild) || (adminRole && m.roles.cache.has(adminRole))) ids.add(m.id);
+      }
+    } catch (error) {
+      console.error('Staff list for the website fell back to the server owner:', error);
+    }
+    staffCache = { at: Date.now(), ids: [...ids] };
+    return staffCache.ids;
+  }
   function scheduleSync(delayMs = 4000) {
     if (!siteEnabled(d.site)) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(async () => {
-      const r = await syncGroups(store, d.site);
+      const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined));
       if (!r.ok) console.error('Website group sync failed:', r.error);
     }, delayMs);
   }

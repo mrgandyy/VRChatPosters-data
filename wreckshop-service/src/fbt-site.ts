@@ -43,8 +43,11 @@ export function statusLabel(g: Pick<Group, 'tier' | 'level' | 'vrchatUrl' | 'agr
   return isVerified(g) ? 'Verified' : 'Registered';
 }
 
-/** The group list the website mirrors. Group #0 (the house default) is included but never shown. */
-export function syncPayload(store: Store) {
+/**
+ * The group list the website mirrors. Group #0 (the house default) is included but never shown.
+ * `staff` (Discord ids of server managers and the admin role) unlocks the website's staff pages.
+ */
+export function syncPayload(store: Store, staff?: string[]) {
   const reps = store.db.prepare('SELECT group_id AS g, user_id AS u FROM representatives').all() as { g: number; u: string }[];
   const byGroup = new Map<number, string[]>();
   for (const r of reps) byGroup.set(r.g, [...(byGroup.get(r.g) ?? []), r.u]);
@@ -55,11 +58,12 @@ export function syncPayload(store: Store) {
       verified: isVerified(g), enabled: !!g.enabled, vrchatGroupId: vrcGroupId(g.vrchatUrl),
       reps: (byGroup.get(g.id) ?? []).filter(u => /^\d{5,25}$/.test(u)),
     })),
+    ...(staff ? { staff: [...new Set(staff)].filter(u => /^\d{5,25}$/.test(u)).slice(0, 200) } : {}),
   };
 }
 
-export async function syncGroups(store: Store, c: SiteConfig): Promise<SiteResult<{ saved: number; hidden: number }>> {
-  return sitePost(c, '/api/bot/groups', syncPayload(store), 30_000);
+export async function syncGroups(store: Store, c: SiteConfig, staff?: string[]): Promise<SiteResult<{ saved: number; hidden: number }>> {
+  return sitePost(c, '/api/bot/groups', syncPayload(store, staff), 30_000);
 }
 
 export interface OutboxItem { id: number; kind: string; payload: Record<string, unknown>; attempts: number }
