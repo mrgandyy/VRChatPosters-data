@@ -37,17 +37,25 @@ export function vrcGroupId(url: string | null): string | null {
   return m ? m[0].toLowerCase() : null;
 }
 
-export function statusLabel(g: Pick<Group, 'tier' | 'level' | 'vrchatUrl' | 'agreementVersion'>): 'Headliner' | 'Premium' | 'Verified' | 'Registered' {
+/**
+ * The group counts as verified when one of its reps holds the Discord server's Verified role
+ * (the owner's rule, Oct 2026), or the old way: VRChat group linked and rules accepted.
+ */
+export function groupVerified(g: Pick<Group, 'vrchatUrl' | 'agreementVersion'>, reps: string[], verifiedUsers?: Set<string>): boolean {
+  return isVerified(g) || (!!verifiedUsers && reps.some(u => verifiedUsers.has(u)));
+}
+
+export function statusLabel(g: Pick<Group, 'tier' | 'level' | 'vrchatUrl' | 'agreementVersion'>, roleVerified = false): 'Headliner' | 'Premium' | 'Verified' | 'Registered' {
   if (g.tier === 'premium' && g.level === 'headliner') return 'Headliner';
   if (g.tier === 'premium') return 'Premium';
-  return isVerified(g) ? 'Verified' : 'Registered';
+  return roleVerified || isVerified(g) ? 'Verified' : 'Registered';
 }
 
 /**
  * The group list the website mirrors. Group #0 (the house default) is included but never shown.
  * `staff` (Discord ids of server managers and the admin role) unlocks the website's staff pages.
  */
-export function syncPayload(store: Store, staff?: string[], names?: Map<string, string>) {
+export function syncPayload(store: Store, staff?: string[], names?: Map<string, string>, verifiedUsers?: Set<string>) {
   const reps = store.db.prepare('SELECT group_id AS g, user_id AS u FROM representatives').all() as { g: number; u: string }[];
   const byGroup = new Map<number, string[]>();
   for (const r of reps) byGroup.set(r.g, [...(byGroup.get(r.g) ?? []), r.u]);
@@ -55,7 +63,7 @@ export function syncPayload(store: Store, staff?: string[], names?: Map<string, 
     full: true,
     groups: store.groups().map(g => ({
       id: g.id, name: g.name, tier: g.tier, headliner: g.tier === 'premium' && g.level === 'headliner',
-      verified: isVerified(g), enabled: !!g.enabled, vrchatGroupId: vrcGroupId(g.vrchatUrl),
+      verified: groupVerified(g, byGroup.get(g.id) ?? [], verifiedUsers), enabled: !!g.enabled, vrchatGroupId: vrcGroupId(g.vrchatUrl),
       reps: (byGroup.get(g.id) ?? []).filter(u => /^\d{5,25}$/.test(u)),
       code: /^\d{8}$/.test(g.code) ? g.code : undefined,
       repNames: Object.fromEntries((byGroup.get(g.id) ?? []).flatMap(u => names?.get(u) ? [[u, names.get(u)!.slice(0, 64)]] : [])),
@@ -64,8 +72,8 @@ export function syncPayload(store: Store, staff?: string[], names?: Map<string, 
   };
 }
 
-export async function syncGroups(store: Store, c: SiteConfig, staff?: string[], names?: Map<string, string>): Promise<SiteResult<{ saved: number; hidden: number }>> {
-  return sitePost(c, '/api/bot/groups', syncPayload(store, staff, names), 30_000);
+export async function syncGroups(store: Store, c: SiteConfig, staff?: string[], names?: Map<string, string>, verifiedUsers?: Set<string>): Promise<SiteResult<{ saved: number; hidden: number }>> {
+  return sitePost(c, '/api/bot/groups', syncPayload(store, staff, names, verifiedUsers), 30_000);
 }
 
 export interface OutboxItem { id: number; kind: string; payload: Record<string, unknown>; attempts: number }

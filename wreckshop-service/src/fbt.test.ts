@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { Store } from './db.js';
 import { catalog } from './publish.js';
 import { parseWhen, zonedToUtc } from './fbt-time.js';
-import { isVerified, sitePost, statusLabel, syncGroups, syncPayload, vrcGroupId } from './fbt-site.js';
+import { groupVerified, isVerified, sitePost, statusLabel, syncGroups, syncPayload, vrcGroupId } from './fbt-site.js';
 
 const GRP = 'grp_3efba4a4-18d7-43ec-b8ef-1cafd9cec1c4';
 
@@ -43,6 +43,21 @@ test('headliner sits on premium; the world catalog still says premium', () => {
     s.setTier(g.id, 'standard');
     assert.equal(s.group(g.id)!.level, null, 'dropping to standard clears headliner');
     assert.throws(() => s.setHeadliner(0, true));
+  } finally { s.close(); }
+});
+
+test('a rep with the Discord Verified role verifies their group, link or not', () => {
+  const s = new Store(':memory:');
+  try {
+    const g = s.registerGroup('No Link Yet', 'standard', undefined, '100000000000000005');
+    const grp = s.group(g.id)!;
+    assert.equal(isVerified(grp), false);
+    assert.equal(groupVerified(grp, s.representatives(g.id), new Set()), false);
+    assert.equal(groupVerified(grp, s.representatives(g.id), new Set(['100000000000000005'])), true);
+    assert.equal(statusLabel(grp, true), 'Verified');
+    const p = syncPayload(s, undefined, undefined, new Set(['100000000000000005']));
+    assert.equal(p.groups.find(x => x.id === g.id)!.verified, true, 'the website sees them as verified');
+    assert.equal(syncPayload(s).groups.find(x => x.id === g.id)!.verified, false);
   } finally { s.close(); }
 });
 

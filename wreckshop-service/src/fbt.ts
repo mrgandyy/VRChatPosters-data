@@ -9,7 +9,7 @@ import {
 } from 'discord.js';
 import type { Store } from './db.js';
 import { normalizeGroupLink, validateGroupName } from './group-link.js';
-import { isVerified, sitePost, siteEnabled, statusLabel, syncGroups, type OutboxFailure, type OutboxItem, type SiteConfig } from './fbt-site.js';
+import { groupVerified, sitePost, siteEnabled, statusLabel, syncGroups, type OutboxFailure, type OutboxItem, type SiteConfig } from './fbt-site.js';
 import { applyAdmin, setLevel, type AdminAction } from './fbt-admin.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import type { Group } from './types.js';
@@ -40,26 +40,57 @@ export function createFbt(d: FbtDeps) {
 
   // ── Website sync ─────────────────────────────────────────────────────────────────────────
   let syncTimer: NodeJS.Timeout | undefined;
-  let staffCache: { at: number; ids: string[] } | undefined;
-  /** Server owner, members who can Manage Server, and the bot's admin role: staff on the website. */
-  async function staffIds(): Promise<string[] | undefined> {
+  // One scan of the member list feeds both the website's staff list and the Verified-role rule.
+  let scan: { at: number; staff: string[]; verified: Set<string> } | undefined;
+  let roleNote = '';
+  /** The verify bot's role: setting fbt_verified_role, else a role named "Verified". */
+  function verifiedRoleId(guild: Guild): string | undefined {
+    const set = store.setting('fbt_verified_role');
+    if (set && guild.roles.cache.has(set)) return set;
+    const roles = [...guild.roles.cache.values()].filter(r => r.id !== guild.id);
+    const role = roles.find(r => /^verified$/i.test(r.name.trim()))
+      ?? roles.find(r => /\bverified\b/i.test(r.name) && !/un-?verified|not verified|pending/i.test(r.name));
+    return role?.id;
+  }
+  async function memberScan(): Promise<typeof scan> {
     const guild = d.client.guilds.cache.get(d.guildId);
-    if (!guild) return staffCache?.ids;
-    if (staffCache && Date.now() - staffCache.at < 30 * 60_000) return staffCache.ids;
+    if (!guild) return scan;
+    if (scan && Date.now() - scan.at < 10 * 60_000) return scan;
     const adminRole = store.setting('admin_role');
-    const ids = new Set<string>([guild.ownerId]);
+    const staff = new Set<string>([guild.ownerId]);
+    const verified = new Set<string>();
+    const roleId = verifiedRoleId(guild);
     try {
       // The full member list needs the Server Members intent, which is on while welcomes are on.
       const members = d.welcome ? await guild.members.fetch() : guild.members.cache;
       for (const m of members.values()) {
         if (m.user.bot) continue;
-        if (m.permissions.has(PermissionFlagsBits.ManageGuild) || (adminRole && m.roles.cache.has(adminRole))) ids.add(m.id);
+        if (m.permissions.has(PermissionFlagsBits.ManageGuild) || (adminRole && m.roles.cache.has(adminRole))) staff.add(m.id);
+        if (roleId && m.roles.cache.has(roleId)) verified.add(m.id);
       }
     } catch (error) {
-      console.error('Staff list for the website fell back to the server owner:', error);
+      console.error('Member scan for the website fell back to cached members:', error);
     }
-    staffCache = { at: Date.now(), ids: [...ids] };
-    return staffCache.ids;
+    const note = roleId ? `Verified role "${guild.roles.cache.get(roleId)?.name}": ${verified.size} members` : 'No Verified role found (set fbt_verified_role)';
+    if (note !== roleNote) { roleNote = note; console.log(note); }
+    scan = { at: Date.now(), staff: [...staff], verified };
+    return scan;
+  }
+  /** Server owner, members who can Manage Server, and the bot's admin role: staff on the website. */
+  async function staffIds(): Promise<string[] | undefined> {
+    return (await memberScan())?.staff;
+  }
+  /** Everyone holding the Verified role right now (the member cache follows role changes live). */
+  function currentVerified(): Set<string> {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const roleId = guild && verifiedRoleId(guild);
+    const out = new Set<string>(scan?.verified ?? []);
+    if (guild && roleId) for (const m of guild.members.cache.values()) if (m.roles.cache.has(roleId)) out.add(m.id); else out.delete(m.id);
+    return out;
+  }
+  /** A group is verified when one of its reps has the Discord Verified role, or the old link + rules way. */
+  function verifiedGroup(g: Group): boolean {
+    return groupVerified(g, store.representatives(g.id), currentVerified());
   }
   /** Display names of representatives the bot can see, so the website shows names, not ids. */
   function memberNames(): Map<string, string> {
@@ -87,7 +118,7 @@ export function createFbt(d: FbtDeps) {
     if (!siteEnabled(d.site)) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(async () => {
-      const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined), memberNames());
+      const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined), memberNames(), currentVerified());
       if (!r.ok) console.error('Website group sync failed:', r.error);
     }, delayMs);
   }
@@ -199,18 +230,20 @@ export function createFbt(d: FbtDeps) {
   function verifyStatus(g: Group) {
     const linked = Boolean(g.vrchatUrl), rules = Boolean(g.agreementVersion);
     const lines = [
-      `**${g.name}** (#${g.id}) · ${statusLabel(g)}`,
+      `**${g.name}** (#${g.id}) · ${statusLabel(g, verifiedGroup(g))}`,
       '',
       `✅ Registered · your code is \`${g.code}\``,
       `${linked ? '✅' : '⬜'} VRChat group linked${linked ? '' : ': paste your VRChat group page link'}`,
       `${rules ? '✅' : '⬜'} Hosting rules accepted`,
       '',
-      isVerified(g) ? 'You\'re **verified**. Your resort gets bronze trim on the Strip, and collabs are unlocked.' : 'Finish both to get verified. It\'s instant, no staff step.',
+      verifiedGroup(g)
+        ? `You're **verified**. Your resort gets bronze trim on the Strip, and collabs are unlocked.${linked ? '' : ' Link your VRChat group too: it adds the Join button in the world and lets us count your group rooms.'}`
+        : 'Get the **Verified** role from the verify bot, or finish both steps above. Either way it\'s instant.',
     ];
     const row = new ActionRowBuilder<ButtonBuilder>();
     if (!linked) row.addComponents(new ButtonBuilder().setCustomId('fbt:link').setLabel('Link VRChat group').setStyle(ButtonStyle.Primary));
     if (!rules) row.addComponents(new ButtonBuilder().setCustomId('fbt:rules').setLabel('Read & accept hosting rules').setStyle(ButtonStyle.Primary));
-    if (isVerified(g)) row.addComponents(new ButtonBuilder().setCustomId('fbt:apply').setLabel('Apply: Premium / Headliner').setStyle(ButtonStyle.Secondary));
+    if (verifiedGroup(g)) row.addComponents(new ButtonBuilder().setCustomId('fbt:apply').setLabel('Apply: Premium / Headliner').setStyle(ButtonStyle.Secondary));
     return { content: lines.join('\n'), components: row.components.length ? [row] : [] };
   }
 
@@ -286,7 +319,7 @@ export function createFbt(d: FbtDeps) {
         return true;
       case 'apply':
         if (needGroup(i)) return true;
-        if (!isVerified(g!)) { await i.reply({ ...verifyStatus(g!), flags: EPHEMERAL }); return true; }
+        if (!verifiedGroup(g!)) { await i.reply({ ...verifyStatus(g!), flags: EPHEMERAL }); return true; }
         if (g!.level === 'headliner') { await say(i, `${g!.name} is already a Headliner. Nothing to apply for.`); return true; }
         await i.reply({ content: 'Apply any time. Staff review it here in Discord, and I\'ll DM you the answer.', components: [applyChoices(g!)], flags: EPHEMERAL });
         return true;
@@ -446,7 +479,7 @@ export function createFbt(d: FbtDeps) {
     if (i.commandName === 'apply') {
       const g = groupOf(i.user.id);
       if (!g) { await say(i, 'Register your group first with `/start` → Register my group.'); return true; }
-      if (!isVerified(g)) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
+      if (!verifiedGroup(g)) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
       await i.showModal(applyModal(i.options.getString('level', true) as 'premium' | 'headliner'));
       return true;
     }
@@ -484,7 +517,7 @@ export function createFbt(d: FbtDeps) {
       const g = groupOf(i.user.id);
       if (!g) { await say(i, 'Register your group first with `/start` → Register my group.'); return true; }
       if (sub === 'start') {
-        if (!isVerified(g)) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
+        if (!verifiedGroup(g)) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
         const when = resolveWhen(i);
         if (typeof when === 'string') { await say(i, when); return true; }
         await i.deferReply({ flags: EPHEMERAL });
