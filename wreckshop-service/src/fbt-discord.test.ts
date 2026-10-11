@@ -45,12 +45,14 @@ test('announcements: @everyone only when asked; announcement channels are publis
   await assert.rejects(postAnnouncement(g, { channelId: '6', title: 'x', body: 'y', everyone: false, links: [] }), /text channel/);
 });
 
-test('artwork guide fits Discord limits and says the right sizes', async () => {
-  const { artworkGuide } = await import('./fbt-discord.js');
-  const g = artworkGuide('https://fbtsocial.com/');
-  const e = g.embeds[0]!.toJSON();
-  assert.ok((e.fields ?? []).every((f) => f.value.length <= 1024 && f.name.length <= 256));
-  const text = JSON.stringify(e);
-  assert.match(text, /1024 × 1536/); assert.match(text, /2048 × 512/); assert.match(text, /\*\*1–11\*\*/);
-  assert.match(JSON.stringify(g.components[0]!.toJSON()), /https:\/\/fbtsocial.com\/me/);
+test('artwork guide posts fit Discord and match numbering 2', async () => {
+  const { guidePosts } = await import('./fbt-discord.js');
+  const posts = guidePosts('https://fbtsocial.com/', '111', '222');
+  assert.equal(posts.length, 4);
+  assert.ok(posts.every((p) => p.length <= 2000), posts.map((p) => p.length).join(','));
+  assert.match(posts[0]!, /posters \*\*1–11\*\*/); assert.match(posts[0]!, /1024 × 1536/); assert.match(posts[0]!, /<#111>/);
+  assert.match(posts[1]!, /`01` Sidewalk totem 1, front/); assert.match(posts[1]!, /`32` /);
+  assert.match(posts[2]!, /age-verified \(18\+\)/); assert.match(posts[2]!, /fbtheat/);
+  assert.match(posts[3]!, /<#222>/);
+  assert.ok(!posts.join('').includes('1-8') && !posts.join('').includes('01–08'), 'no old numbering');
 });

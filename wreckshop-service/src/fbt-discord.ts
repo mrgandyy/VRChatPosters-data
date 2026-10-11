@@ -3,6 +3,7 @@
 // Nothing here acts on its own: every change comes from a staff click on the site.
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, SnowflakeUtil, type Guild, type GuildBasedChannel, type TextChannel } from 'discord.js';
 import type { Store } from './db.js';
+import { SLOTS, ZONE_LABEL } from './slots.js';
 
 /** Settings that point at channels the bots depend on. These are never deleted from the site. */
 export const PROTECTED_SETTINGS = ['fbt_start_channel', 'fbt_events_channel', 'approval_channel', 'log_channel', 'submission_channel', 'help_channel'];
@@ -71,56 +72,113 @@ export async function postAnnouncement(guild: Guild, a: Announcement): Promise<s
   return msg.id;
 }
 
-/** The bot-owned artwork guide (kept up to date in #artwork-guide). */
-export function artworkGuide(siteUrl: string): { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
-  const u = (p: string) => `${siteUrl.replace(/\/$/, '')}${p}`;
-  const embed = new EmbedBuilder().setColor(0xe8507a).setTitle('🎨 Artwork guide · FBT Social')
-    .setDescription('Put your club\'s art in the world and on the Strip. Staff approve every image, then it goes live with the next publish, usually a few minutes later.')
-    .addFields(
-      { name: 'Easiest: on the website', value: `Sign in at **fbtsocial.com** → **My dashboard** → **Customize**. Pick a spot on the poster map, upload, done. You\'ll see each image\'s status there and get a DM when it\'s approved.\n${u('/me')}` },
-      { name: 'Or here in Discord', value: '`/poster submit` (one image) · `/poster batch` (up to 8) · `/billboard submit` · `/backdrop submit` · or the buttons in #wreckshop-submit.' },
-      { name: 'Which posters you get', value: '**1–11** for every club: entrance, sidewalk and arrival hall.\n**12–32** for Premium and Headliner: lower and upper club.\n`/poster map` (or the map on the website) shows exactly where each number hangs.' },
-      { name: 'Sizes', value: [
-        '**Posters:** portrait 2:3, ideally **1024 × 1536**',
-        '**Billboard** (Premium): wide 4:1, **2048 × 512**',
-        '**Photo-wall backdrop** (Premium): 4:3, **2048 × 1536**',
-        '**Website only:** logo (square, 512 × 512), page banner (3:1, 1800 × 600), up to 4 gallery photos',
-        'PNG, JPG or WebP. Up to 10 MB on the website, 12 MB in Discord. At least 256 px a side.',
-      ].join('\n') },
-      { name: 'Tips', value: 'Big, bold text reads best from across the room. Keep it to your own club\'s art and follow VRChat\'s rules. Your posters show in the world whenever your group code is active at the door.' },
-    )
-    .setFooter({ text: 'Kept up to date by the FBT Social bot' });
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setLabel('My dashboard').setStyle(ButtonStyle.Link).setURL(u('/me')),
-    new ButtonBuilder().setLabel('How it works').setStyle(ButtonStyle.Link).setURL(u('/start')));
-  return { embeds: [embed], components: [row] };
+/** The four posts in #artwork-guide, in order: guide, poster map, Premium, activate & troubleshoot. */
+export function guidePosts(siteUrl: string, submitId: string | null, helpId: string | null): string[] {
+  const site = siteUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const submit = submitId ? `<#${submitId}>` : '#wreckshop-submit';
+  const help = helpId ? `<#${helpId}>` : '#wreckshop-help';
+  const zones = (['entrance', 'arrival', 'lower', 'upper'] as const).map((z) => [
+    `**${ZONE_LABEL[z]}**${z === 'lower' || z === 'upper' ? ' (Premium)' : ''}`,
+    ...SLOTS.filter((x) => x.zone === z).map((x) => `\`${String(x.slot).padStart(2, '0')}\` ${x.where}`),
+  ].join('\n'));
+  return [
+    [
+      '# FBT SOCIAL | ARTWORK GUIDE',
+      'Customize your club\'s posters, entrance billboard and photo wall.',
+      '',
+      '## Easiest: the website',
+      `Sign in at **${site}** → **My dashboard** → **Customize**. Pick a spot on the poster map and upload. You\'ll see each image\'s status there and get a DM when it\'s approved. Managers you invite to your team can upload too.`,
+      '',
+      '## Or here in Discord',
+      `\`/poster submit\` one image · \`/poster batch\` up to **8** at once · \`/billboard submit\` · \`/backdrop submit\` · or the buttons in ${submit}.`,
+      '',
+      '## What you get',
+      '**Every club:** posters **1–11** (entrance, sidewalk and arrival hall).',
+      '**Premium & Headliner:** posters **1–32**, the entrance billboard, the photo-wall backdrop, the Join Group button and venue accent presets.',
+      '',
+      '## Artwork sizes',
+      '- **Posters:** 1024 × 1536, 2:3 portrait.',
+      '- **Billboard (Premium):** 2048 × 512, 4:1 wide.',
+      '- **Photo backdrop (Premium):** 2048 × 1536, 4:3. Keep key branding toward the top and sides so people posing don\'t cover it.',
+      'Static **PNG, JPG or WebP**: up to 10 MB on the website, 12 MB in Discord. Keep text large and match the aspect ratio to avoid borders. Upload single images, not a combined poster sheet.',
+    ].join('\n'),
+    [
+      '# POSTER SLOT MAP: ALL 32 SPOTS',
+      '**Updated October 11, 2026.** Numbered in the order guests walk in. On the sidewalk totems, front and back are different spots.',
+      '**1–11:** every club. **12–32:** Premium & Headliner.',
+      '',
+      ...zones.flatMap((z) => [z, '']),
+      `\`/poster map\` shows this any time, and the map on **My dashboard → Customize** shows which spots have your art.`,
+    ].join('\n'),
+    [
+      '# PREMIUM & HEADLINER',
+      '## 1. Apply',
+      `Any verified club can apply, on **${site}/apply** or with \`/apply\`. Staff see your real numbers (season heat, nights hosted, best night) and decide; you get a DM either way.`,
+      '',
+      '## 2. The Premium promise',
+      'Premium clubs run **age-verified (18+) instances** in VRChat and let our tracker **fbtheat** into their VRChat group. After approval fbtheat asks to join: accept it in VRChat → your group → Members → Requests (invite-only groups: invite fbtheat). Within **7 days** you need fbtheat in your group and an age-verified room, or the club goes back to Standard.',
+      '',
+      '## 3. Upload your Premium art',
+      `Posters 12–32, the billboard and the photo backdrop: on **My dashboard → Customize**, or \`/poster submit group:<n> slot:17\`, \`/billboard submit group:<n>\`, \`/backdrop submit group:<n>\`. Your club number is in \`/group mine\`.`,
+      '',
+      '## 4. Link your VRChat group',
+      'On **My dashboard**, or `/group link group:<n> vrchat_group:<group URL or grp_ id>`. The Join Group button in the world opens your group page; visitors choose whether to join.',
+    ].join('\n'),
+    [
+      '# ACTIVATE & CHECK YOUR ARTWORK',
+      '## Activate in-world',
+      '1. Get your eight-digit code with `/group mine`.',
+      '2. Have the authorized instance host enter it at the entrance.',
+      '3. Wait for your published artwork to load.',
+      '4. Check your posters, billboard, photo backdrop and Join Group button.',
+      '5. Authorized host/staff can preview and apply venue accent presets.',
+      '',
+      '## Know your IDs',
+      '- **Club number:** used in Discord upload commands.',
+      '- **VRChat group ID:** starts with `grp_`; used for the Join Group link and for counting your nights.',
+      '- **Eight-digit activation code:** selects your club\'s setup in-world. It does not grant staff or VIP roles.',
+      '',
+      '## Approval & troubleshooting',
+      '**Submit → Review → Approve → Publish → Loads in-world**',
+      'Uploads need a club owner or manager. Billboards and backdrops also need Premium. Approved art goes live with the next publish, usually within minutes; in-world downloads can take a moment.',
+      `Missing something? Check **My dashboard → Customize** or \`/poster list\`, then ask in ${help} with your club number, the spot and a screenshot.`,
+      '`/poster remove group:<n> slot:<n>` restores the default artwork. `/ws-help` for every command.',
+    ].join('\n'),
+  ];
 }
 
+const HEADINGS = ['# FBT SOCIAL | ARTWORK GUIDE', '# POSTER SLOT MAP', '# PREMIUM', '# ACTIVATE & CHECK'];
+
 /**
- * Keeps one bot-owned guide message in #artwork-guide: edits it if it's there, posts it otherwise.
- * Messages other people wrote in the channel are left alone (and listed in the log for staff).
+ * Keeps the four bot-written posts in #artwork-guide current: edits them in place (adopting the
+ * older posts by their headings), posts any that are missing. Messages other people wrote are left alone.
  */
 export async function ensureArtworkGuide(guild: Guild, store: Store, siteUrl: string): Promise<string> {
   const ch = guild.channels.cache.find((c) => c.type === ChannelType.GuildText && c.name.toLowerCase().replace(/[^a-z0-9]/g, '') === 'artworkguide') as TextChannel | undefined;
   if (!ch) return 'No #artwork-guide channel; skipped the artwork guide.';
   const me = guild.members.me?.id;
-  const recent = await ch.messages.fetch({ limit: 30 }).catch(() => undefined);
-  const others = recent ? [...recent.values()].filter((m) => m.author.id !== me) : [];
-  const saved = store.setting('artwork_guide_message');
-  let msg = saved ? await ch.messages.fetch(saved).catch(() => undefined) : undefined;
-  if (!msg && recent) msg = [...recent.values()].find((m) => m.author.id === me && m.embeds[0]?.title?.startsWith('🎨 Artwork guide'));
-  const body = artworkGuide(siteUrl);
-  if (msg) await msg.edit(body);
-  else { msg = await ch.send(body); await msg.pin().catch(() => undefined); }
-  store.setSetting('artwork_guide_message', msg.id);
-  const oldMine = recent ? [...recent.values()].filter((m) => m.author.id === me && m.id !== msg!.id) : [];
-  if (oldMine.length) console.log(`Older bot posts in #${ch.name} (${oldMine.length}):\n` + oldMine.slice(0, 10).map((m) =>
-    `    ${m.id} ${m.createdAt.toISOString().slice(0, 10)}: ${(m.content || m.embeds[0]?.title || m.embeds[0]?.description || '[attachment]').replace(/\s+/g, ' ').slice(0, 140)}`).join('\n'));
-  if (store.setting('artwork-guide-dump') !== '2') {
-    // One-time: print the old guide posts in full so staff can review what they said.
-    for (const m of oldMine) console.log(`--- ${m.id} ---\n${m.content}`);
-    store.setSetting('artwork-guide-dump', '2');
+  const recent = await ch.messages.fetch({ limit: 50 }).catch(() => undefined);
+  const mine = recent ? [...recent.values()].filter((m) => m.author.id === me) : [];
+  const saved = JSON.parse(store.setting('artwork_guide_ids') ?? '[]') as string[];
+  const posts = guidePosts(siteUrl, store.setting('submission_channel') ?? null, store.setting('help_channel') ?? null);
+  const ids: string[] = [];
+  for (let i = 0; i < posts.length; i++) {
+    let msg = saved[i] ? await ch.messages.fetch(saved[i]!).catch(() => undefined) : undefined;
+    if (!msg) msg = mine.filter((m) => m.content.startsWith(HEADINGS[i]!)).sort((a, b) => a.createdTimestamp - b.createdTimestamp)[0];
+    const body = { content: posts[i]!, embeds: [], components: i === 0 ? [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setLabel('My dashboard').setStyle(ButtonStyle.Link).setURL(`${siteUrl.replace(/\/$/, '')}/me`))] : [] };
+    if (msg) await msg.edit(body);
+    else msg = await ch.send(body);
+    ids.push(msg.id);
   }
-  const list = others.slice(0, 8).map((m) => `    ${m.author.username} ${m.createdAt.toISOString().slice(0, 10)}: ${m.content.replace(/\s+/g, ' ').slice(0, 90) || '[embed/attachment]'}`).join('\n');
-  return `Artwork guide ready in #${ch.name}.${others.length ? ` Other messages there (left alone):\n${list}` : ''}`;
+  store.setSetting('artwork_guide_ids', JSON.stringify(ids));
+  // The short embed guide posted earlier today is replaced by the posts above.
+  const extra = store.setting('artwork_guide_message');
+  if (extra && !ids.includes(extra)) {
+    const m = await ch.messages.fetch(extra).catch(() => undefined);
+    if (m && m.author.id === me) await m.delete().catch(() => undefined);
+    store.setSetting('artwork_guide_message', '');
+  }
+  const others = recent ? [...recent.values()].filter((m) => m.author.id !== me).length : 0;
+  return `Artwork guide (4 posts) up to date in #${ch.name}.${others ? ` ${others} message(s) by others left alone.` : ''}`;
 }
