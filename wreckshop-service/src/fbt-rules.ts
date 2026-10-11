@@ -62,7 +62,7 @@ export function premiumWelcome(groupName: string, level: 'premium' | 'headliner'
           : `Link your VRChat group first (\`/group link\` or on the website), then accept **${TRACKER_NAME}**'s join request.`,
         `Then run your nights as **age-verified (18+) group instances**. ${TRACKER_NAME} checks automatically. You have **7 days** to have both in place, or the club goes back to Standard.`,
       ].join('\n') },
-      { name: 'Step 2 · Make it yours', value: `Upload your posters, billboard, backdrop, logo and banner, and pick your colour on **My club**: ${opts.manageUrl}` },
+      { name: 'Step 2 · Make it yours', value: `Sign in at fbtsocial.com and open **My dashboard** (top right): it's your club's control panel. Upload your posters, billboard, backdrop, logo and banner, and pick your colour: ${opts.manageUrl}` },
       { name: 'Step 3 · Book your nights', value: `Post your nights at ${opts.hostUrl} or with \`/event create\`. They land on the Strip, in #fbt-events and on your page: ${opts.pageUrl}. Collab nights pay both clubs the full heat.` },
     ],
   };

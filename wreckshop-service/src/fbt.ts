@@ -204,7 +204,7 @@ export function createFbt(d: FbtDeps) {
         '',
         '**1 · Get the Verified role:** run our verify bot. Verified members can register a club and host.',
         '**2 · Register your club:** free, one minute. You get a club number and a door code for the world.',
-        '**3 · Make it yours:** posters, logo, banner, gallery and your colour, all on **My club** at fbtsocial.com.',
+        '**3 · Make it yours:** posters, logo, banner, gallery and your colour. Sign in at fbtsocial.com and open **My dashboard** (top right): it\'s your club\'s control panel.',
         '**4 · Host a night:** post it and it\'s announced here and lit up on the Strip. Crowds earn heat for the season.',
         '**5 · Collab:** team up with another club and you both earn the night\'s heat, plus a bonus.',
         '**6 · Premium or Headliner:** apply any time. Premium clubs run **age-verified (18+) rooms** and let our tracker **fbtheat** into their VRChat group.',
@@ -226,7 +226,7 @@ export function createFbt(d: FbtDeps) {
         new ButtonBuilder().setCustomId('fbt:posters').setLabel('Posters & billboards').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setLabel('The Strip').setStyle(ButtonStyle.Link).setURL(url('/'))),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setLabel('My club: customize').setStyle(ButtonStyle.Link).setURL(url('/manage')),
+        new ButtonBuilder().setLabel('My dashboard').setStyle(ButtonStyle.Link).setURL(url('/me')),
         new ButtonBuilder().setLabel('Leaderboard').setStyle(ButtonStyle.Link).setURL(url('/leaderboard')),
         new ButtonBuilder().setLabel('Dancers & DJs').setStyle(ButtonStyle.Link).setURL(url('/join'))),
     ];
@@ -637,7 +637,7 @@ export function createFbt(d: FbtDeps) {
     });
     const embed = new EmbedBuilder().setColor(level === 'headliner' ? GOLD : EMERALD).setTitle(w.title).setDescription(w.description)
       .addFields(w.fields.map(f => ({ name: f.name, value: f.value.slice(0, 1024) }))).setFooter({ text: 'FBT Social · the after-dark Strip' });
-    await dm(userId, { embeds: [embed], components: [linkRow(['Customize My club', url(`/manage?group=${groupId}`)], ['Host a night', url('/host')], ['The Strip', url('/')])] });
+    await dm(userId, { embeds: [embed], components: [linkRow(['My dashboard', url('/me')], ['Customize', url(`/manage?group=${groupId}`)], ['Host a night', url('/host')])] });
   }
 
   async function deliver(item: OutboxItem): Promise<void> {
@@ -830,12 +830,22 @@ export function createFbt(d: FbtDeps) {
 
   // ── Channel list for the Control room ───────────────────────────────────────────────────
   let channelTimer: NodeJS.Timeout | undefined;
+  let loggedChannels = false;
   function scheduleChannels(delayMs = 10_000) {
     if (!siteEnabled(d.site)) return;
     clearTimeout(channelTimer);
     channelTimer = setTimeout(() => {
       const guild = d.client.guilds.cache.get(d.guildId);
-      if (guild) void sitePost(d.site, '/api/bot/channels', { channels: channelInventory(guild, store) }, 30_000)
+      if (!guild) return;
+      const channels = channelInventory(guild, store);
+      if (!loggedChannels) {
+        // Once per start, for whoever reads the logs: the server's channels in order.
+        loggedChannels = true;
+        const day = (iso: string | null) => (iso ? `${Math.floor((Date.now() - Date.parse(iso)) / 86_400_000)}d` : 'never');
+        console.log(`Channels (${channels.length}):\n` + channels.filter(c => c.kind !== 'category').sort((a, b) => (a.parentName ?? '').localeCompare(b.parentName ?? '') || a.position - b.position)
+          .map(c => `  ${c.parentName ?? '(none)'} › ${c.kind === 'voice' ? '🔊' : '#'}${c.name}  last:${day(c.lastMessageAt)}${c.protected ? `  [bot:${c.protected}]` : ''}${c.everyoneCanView ? '' : '  private'}`).join('\n'));
+      }
+      void sitePost(d.site, '/api/bot/channels', { channels }, 30_000)
         .then(r => { if (!r.ok) console.error('Channel list sync failed:', r.error); });
     }, delayMs);
   }
