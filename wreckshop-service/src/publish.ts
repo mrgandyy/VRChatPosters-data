@@ -1,6 +1,7 @@
 import { liveBackdrop, prepareBackdrop, type BackdropRelease } from './backdrop.js';
 import { liveBillboard, prepareBillboard, type BannerRelease } from './billboard.js';
 import { liveBooth, prepareBooth, type BoothRelease } from './booth.js';
+import { liveStudio, prepareStudioTexture, studioEntry, studioTheme, type StudioRelease } from './studio.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -34,8 +35,15 @@ export function poolIndex(group: Group, revision: number): number {
     throw new Error('Authored atlas URL capacity exhausted; extend and reupload the world.');
   return group.atlasSlot * RELEASES_PER_GROUP + revision - 1;
 }
-/** Brand look from the website: accent '#rrggbb' ('' = club default) and glow 0 soft, 1 standard, 2 bright. */
+/**
+ * Brand look from the website: accent '#rrggbb' ('' = club default) and glow 0 soft, 1 standard, 2 bright.
+ * A Premium group's saved Venue Studio theme feeds the same two fields, so worlds that only read
+ * accent/glow still pick up the studio colour and glow level.
+ */
 export function lookOf(store: Store, groupId: number): { accent: string; glow: number } {
+  const group = store.group(groupId);
+  const studio = group?.enabled && group.tier === 'premium' ? studioTheme(store, groupId) : undefined;
+  if (studio) return { accent: studio.accent, glow: studio.glowLevel };
   try {
     const v = JSON.parse(store.setting(`look-${groupId}`) ?? '{}') as { accent?: unknown; glow?: unknown };
     const accent = typeof v.accent === 'string' && /^#[0-9a-f]{6}$/.test(v.accent) ? v.accent : '';
@@ -53,9 +61,10 @@ export async function publishCatalog(store: Store, config: PublishConfig): Promi
   return changed ? 'Published venue looks to the world catalog.' : undefined;
 }
 
-export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacement?: BannerRelease, backdropReplacement?: BackdropRelease, boothReplacement?: BoothRelease): Buffer {
+export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacement?: BannerRelease, backdropReplacement?: BackdropRelease, boothReplacement?: BoothRelease, studioReplacement?: StudioRelease): Buffer {
   const groups = store.groups().map(group => {
     const active = replacement?.groupId === group.id ? replacement : store.activeRelease(group.id);
+    const studio = studioEntry(store, group, replacement?.groupId === group.id ? studioReplacement : undefined);
     return {
       id: group.id, name: group.name, tier: group.tier, code: group.code,
       // Public recognition is group-only; Discord identities remain private.
@@ -71,7 +80,9 @@ export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacemen
       headliner: group.tier === 'premium' && group.level === 'headliner',
       atlasSha256: active?.sha256 ?? '',
       // The group's brand colour and glow (chosen on the website). The world may map it to its nearest accent.
-      ...lookOf(store, group.id)
+      ...lookOf(store, group.id),
+      // Venue Studio (Premium/Headliner with a saved theme only): applied once when the code is activated.
+      ...(studio ? { studio } : {}),
     };
   });
   return Buffer.from(JSON.stringify({ schema: 1, brand: 'Wreckshop Worlds',
@@ -158,7 +169,8 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   const banner = await prepareBillboard(store,groupId);
   const backdrop = await prepareBackdrop(store,groupId);
   const booth = await prepareBooth(store,groupId);
-  const nextCatalog = catalog(store,candidate,banner?.release,backdrop?.release,booth?.release);
+  const studio = await prepareStudioTexture(store,groupId);
+  const nextCatalog = catalog(store,candidate,banner?.release,backdrop?.release,booth?.release,studio?.release);
 
   if (config.dryRun) {
     const out = join(config.dataDir,'dry-run');
@@ -168,6 +180,7 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
     if(banner)await writeFile(join(out,`group-${groupId}-billboard.png`),banner.bytes);
     if(backdrop)await writeFile(join(out,`group-${groupId}-backdrop.png`),backdrop.bytes);
     if(booth)await writeFile(join(out,`group-${groupId}-booth.png`),booth.bytes);
+    if(studio)await writeFile(join(out,`group-${groupId}-studio.png`),studio.bytes);
     await writeFile(join(out,'catalog.json'),nextCatalog);
     return `dry-run: ${out}`;
   }
@@ -186,6 +199,10 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   if(booth && liveBooth(store,groupId)?.sha256 !== booth.release.sha256){
     await publishFile(config,booth.release.path,booth.bytes,`Publish FBT Social group ${groupId} DJ booth front`);
   }
+  if(studio && liveStudio(store,groupId)?.sha256 !== studio.release.sha256){
+    // Studio slots are overwritten in place (one per group), unlike the immutable artwork pools.
+    await publishFile(config,studio.release.path,studio.bytes,`Publish FBT Social studio texture slot ${studio.release.poolIndex}`);
+  }
   const catalogPath = 'catalog.json';
   // Assets were verified before activation. A slow CDN is not a failed write:
   // rolling back here creates another build and repeatedly cancels deployment.
@@ -193,6 +210,7 @@ export async function publishGroup(store: Store, groupId: number, config: Publis
   if(banner)store.setSetting(`billboard-live-${groupId}`,JSON.stringify(banner.release));
   if(backdrop)store.setSetting(`backdrop-live-${groupId}`,JSON.stringify(backdrop.release));
   if(booth)store.setSetting(`booth-live-${groupId}`,JSON.stringify(booth.release));
+  if(studio)store.setSetting(`studio-live-${groupId}`,JSON.stringify(studio.release));
   store.db.transaction(() => {
     if (!sameArtwork) store.recordRelease(groupId,revision,index,atlas.sha256,url);
     store.setSetting(`poster-sheet-b-${groupId}-${revision}`,JSON.stringify({sha256B:atlasB.sha256,publicUrlB:candidate.publicUrlB}));

@@ -3,7 +3,8 @@ import { normalizeGroupLink, isGroupReference, validateGroupName } from './group
 import Database from 'better-sqlite3';
 import { initializeBillboards } from './billboard.js';
 import { initializeBooths } from './booth.js';
-import { initializeLockers } from './locker.js';
+import { initializePerformers } from './performers.js';
+import { initializeStudio } from './studio.js';
 import { randomInt } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -66,7 +67,10 @@ export class Store {
     initializeBillboards(this);
     initializeBackdrops(this);
     initializeBooths(this);
-    initializeLockers(this);
+    // The October 2026 dancer-locker tables (lockers, locker_assignments), if an early build made them,
+    // are left as they are and never read.
+    initializePerformers(this);
+    initializeStudio(this);
     const columns = this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[];
     if(path!==':memory:' && !columns.some(column=>column.name==='deleted'))
       this.db.prepare('VACUUM INTO ?').run(`${path}.before-group-management-${Date.now()}.sqlite`);
