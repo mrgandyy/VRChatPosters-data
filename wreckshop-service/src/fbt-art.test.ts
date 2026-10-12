@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import sharp from 'sharp';
 import type { Client } from 'discord.js';
 import { Store } from './db.js';
-import { createArt, kindOfAction } from './fbt-art.js';
+import { RETIRED_ACTIONS, createArt, kindOfAction } from './fbt-art.js';
+import { upsertPerformer } from './performers.js';
 import { artOf, syncPayload } from './fbt-site.js';
 
 function fakeClient(sent: unknown[], edits: unknown[]) {
@@ -64,21 +65,43 @@ test('website artwork: checks, review card, decisions and the art summary', asyn
   } finally { store.db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('website dancer lockers: no group, the VRChat name rides along, one name per dancer', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'wreckshop-locker-art-'));
+test('website performer art: verified performers only, no group, one card per kind', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wreckshop-performer-art-'));
   const store = new Store(join(dir, 'test.sqlite'));
   try {
     store.setSetting('approval_channel', 'c1');
-    const sent: { content: string }[] = [], edits: unknown[] = [];
+    const sent: { content: string; components: { components: { data: { custom_id: string } }[] }[] }[] = [], edits: unknown[] = [];
     const art = createArt({ store, dataDir: dir, client: fakeClient(sent, edits), guildId: 'g1', auditLog: async () => {} });
-    const tall = await sharp({ create: { width: 500, height: 700, channels: 3, background: '#553366' } }).png().toBuffer();
-    await assert.rejects(art.submit('locker', 0, null, '111111', tall, 'up-l0', '  '), /display name/);
-    const id = await art.submit('locker', 0, null, '111111', tall, 'up-l1', ' Velvet*Fox ');
-    assert.match(sent.at(-1)!.content, /Dancer locker #\d+ for \*\*VelvetFox\*\*/);
-    assert.deepEqual(art.reviewOf('locker', id), { groupId: -1, submitter: '111111', status: 'submitted', slot: null });
-    await art.decide('locker', id, true, 'staff');
-    assert.equal(store.setting('lockers-dirty'), '1');
-    await assert.rejects(art.submit('locker', 0, null, '222222', tall, 'up-l2', 'velvet*fox'), /already has a locker/);
+    const tall = await sharp({ create: { width: 512, height: 1024, channels: 3, background: '#553366' } }).png().toBuffer();
+    await assert.rejects(art.submit('pole', 0, null, '111111', tall, 'up-p0'), /verified performers/);
+    upsertPerformer(store, '111111', 'usr_11111111-2222-3333-4444-555555555555', 'Velvet*Fox');
+    const id = await art.submit('pole', 0, null, '111111', tall, 'up-p1');
+    assert.match(sent.at(-1)!.content, /Performer pole wrap #\d+ for \*\*VelvetFox\*\*/);
+    assert.equal(sent.at(-1)!.components[0]!.components[0]!.data.custom_id, `ws:poleapprove:${id}`);
+    assert.deepEqual(art.reviewOf('pole', id), { groupId: -1, submitter: '111111', status: 'submitted', slot: null });
+    assert.equal(art.uploadFor('pole', id), 'up-p1');
+    await art.decide('pole', id, true, 'staff');
+    assert.equal(store.setting('performers-dirty'), '1');
+    await assert.rejects(art.decide('pole', id, true, 'staff'), /already/);
+  } finally { store.db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Venue Studio textures: Premium only, reviewed like the billboard', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wreckshop-studio-art-'));
+  const store = new Store(join(dir, 'test.sqlite'));
+  try {
+    store.setSetting('approval_channel', 'c1');
+    const sent: unknown[] = [], edits: unknown[] = [];
+    const art = createArt({ store, dataDir: dir, client: fakeClient(sent, edits), guildId: 'g1', auditLog: async () => {} });
+    const square = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: '#3a2a1a' } }).png().toBuffer();
+    const standard = store.registerGroup('Plain Room');
+    const premium = store.registerGroup('Gold Room', 'premium');
+    await assert.rejects(art.submit('studio', standard.id, null, 'u1', square), /Premium/);
+    const id = await art.submit('studio', premium.id, null, 'u2', square, 'up-s1');
+    assert.equal(art.reviewOf('studio', id)!.status, 'submitted');
+    await art.decide('studio', id, true, 'staff');
+    assert.equal(art.reviewOf('studio', id)!.status, 'approved');
+    assert.ok(store.nextJob(), 'an approved texture queues the group publish');
   } finally { store.db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -87,7 +110,12 @@ test('review buttons map to their kind', () => {
   assert.deepEqual(kindOfAction('bannerreject'), { kind: 'billboard', approve: false });
   assert.deepEqual(kindOfAction('backdropapprove'), { kind: 'backdrop', approve: true });
   assert.deepEqual(kindOfAction('boothapprove'), { kind: 'booth', approve: true });
-  assert.deepEqual(kindOfAction('lockerreject'), { kind: 'locker', approve: false });
+  assert.deepEqual(kindOfAction('studioapprove'), { kind: 'studio', approve: true });
+  assert.deepEqual(kindOfAction('polereject'), { kind: 'pole', approve: false });
+  assert.deepEqual(kindOfAction('chairapprove'), { kind: 'chair', approve: true });
+  assert.deepEqual(kindOfAction('deckreject'), { kind: 'deck', approve: false });
+  assert.equal(kindOfAction('lockerreject'), undefined, 'dancer lockers are retired');
+  assert.ok(RETIRED_ACTIONS.has('lockerapprove'));
   assert.equal(kindOfAction('appok'), undefined);
 });
 
