@@ -11,11 +11,13 @@ import { submitBillboard, decideBillboard } from './billboard.js';
 import { join, resolve } from 'node:path';
 import { Store } from './db.js';
 import { MAX_SOURCE_BYTES, saveSource } from './atlas.js';
-import { createArt } from './fbt-art.js';
+import { LABEL, RETIRED_ACTIONS, createArt, decideArt, kindOfAction } from './fbt-art.js';
+import { publishPerformers } from './performers.js';
+import { heatDue, publishHeat } from './fbt-heat.js';
 import { activateRollback, processOneJob, publishCatalog, type PublishConfig } from './publish.js';
 import { assertSlot, type Group } from './types.js';
 import { acceptsButtonPrefix, databasePath, legacyName, rebrand } from './branding.js';
-import { URL_POOL_CAPACITY } from './url-pool.js';
+import { SLOT_POOL_CAPACITY, poolCapacity } from './url-pool.js';
 import { posterMap, slotInfo } from './slots.js';
 
 const token = process.env.DISCORD_TOKEN;
@@ -442,10 +444,14 @@ async function handlePublish(i: ChatInputCommandInteraction): Promise<void> {
   if (sub === 'status') {
     const rows = store.db.prepare('SELECT id,group_id,status,attempts,error FROM jobs ORDER BY id DESC LIMIT 12').all() as
       { id:number; group_id:number; status:string; attempts:number; error:string|null }[];
-    const pools = (['atlas','billboard','backdrop'] as const).map(kind => {
+    const pools = [...(['atlas','billboard','backdrop','booth'] as const).map(kind => {
       const used=(store.db.prepare('SELECT COUNT(*) AS n FROM url_reservations WHERE kind=?').get(kind) as {n:number}).n;
-      return `${kind}: ${used}/${URL_POOL_CAPACITY} reserved${used>=URL_POOL_CAPACITY*.8 ? ' — capacity warning' : ''}`;
-    }).join(' · ');
+      const capacity=poolCapacity(kind);
+      return `${kind}: ${used}/${capacity} reserved${used>=capacity*.8 ? ' — capacity warning' : ''}`;
+    }), ...(['performer_pool','studio_pool'] as const).map(table => {
+      const used=(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as {n:number}).n;
+      return `${table === 'performer_pool' ? 'performers' : 'studio'}: ${used}/${SLOT_POOL_CAPACITY} slots${used>=SLOT_POOL_CAPACITY*.8 ? ' — capacity warning' : ''}`;
+    })].join(' · ');
     const jobs=rows.length ? rows.map(r => `#${r.id} group ${r.group_id}: ${r.status} · attempts ${r.attempts}${r.error ? ` · ${r.error.slice(0,100)}` : ''}`).join('\n') : 'No jobs.';
     await i.reply({ content: `${pools}\n${jobs}`.slice(0,2000), flags: ephemeral });
     return;
@@ -489,6 +495,21 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
     await i.update({ content: `${i.message.content}\n${action === 'bannerapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] });
     await fbt.artDecided('billboard',Number(rawId),action === 'bannerapprove').catch(() => undefined); return;
   }
+  if (RETIRED_ACTIONS.has(action ?? '')) {
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    await i.update({ content: `${i.message.content}\nDancer lockers were retired; nothing to decide.`, components: [] });
+    return;
+  }
+  const generic = kindOfAction(action ?? '');
+  if (generic && !['poster','billboard','backdrop'].includes(generic.kind)) {
+    // DJ booth fronts, Venue Studio textures and performers' pole / chair / deck art.
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    const { kind, approve } = generic;
+    decideArt(store,kind,Number(rawId),i.user.id,approve);
+    await i.update({ content: `${i.message.content}\n**${approve ? 'APPROVED' : 'REJECTED'}** by <@${i.user.id}>`, components: [] });
+    await auditLog(i.guild,`${LABEL[kind]} #${rawId} ${approve ? 'approved' : 'rejected'} by <@${i.user.id}>.`);
+    await fbt.artDecided(kind,Number(rawId),approve).catch(() => undefined); return;
+  }
   if (action === 'approve' || action === 'reject') {
     if (!reviewer(i)) throw new Error('Reviewer access is required.');
     const id = Number(rawId);
@@ -501,9 +522,10 @@ async function handleButton(i: ButtonInteraction): Promise<void> {
   }
 }
 const art = createArt({ store, dataDir, client, guildId, auditLog });
+const fbtSite = { url: process.env.FBT_SITE_URL, secret: process.env.FBT_BOT_SECRET };
 const fbt = createFbt({
   client, store, guildId, art,
-  site: { url: process.env.FBT_SITE_URL, secret: process.env.FBT_BOT_SECRET },
+  site: fbtSite, dancerRoleId: process.env.FBT_DANCER_ROLE_ID,
   publicUrl: process.env.FBT_PUBLIC_URL ?? process.env.FBT_SITE_URL ?? 'https://dsc.gg/wreckshop',
   welcome, isAdmin: admin, auditLog,
 });
@@ -554,6 +576,8 @@ client.once('ready', async () => {
     catch (error) { console.error('Automatic channel setup failed:',error); }
   }
   if (!publishConfig.dryRun && !store.activeRelease(0)) store.queuePublish(0);
+  // performers.json should exist (even empty) so the world's URL never 404s; published once on the first start.
+  if (!store.setting('performers-roster')) store.setSetting('performers-dirty','1');
   store.db.prepare("UPDATE jobs SET status='queued' WHERE status='publishing'").run();
   // One-time recovery of the most recent job affected by the Pages outage.
   if (!publishConfig.dryRun && !store.setting('pages-recovery-20261005')) {
@@ -582,6 +606,18 @@ client.once('ready', async () => {
         store.setSetting('catalog-dirty','0');
         const looks = await publishCatalog(store,publishConfig).catch(error => { store.setSetting('catalog-dirty','1'); throw error; });
         if (looks) console.log(looks);
+      }
+      else if (store.setting('performers-dirty') === '1') {
+        // Performers belong to people, not groups: their atlases and performers.json publish on their own, after group jobs.
+        store.setSetting('performers-dirty','0');
+        const performers = await publishPerformers(store,publishConfig).catch(error => { store.setSetting('performers-dirty','1'); throw error; });
+        if (performers) { console.log(performers); await auditLog(client.guilds.cache.get(guildId) ?? null,performers); }
+      }
+      else if (heatDue(store)) {
+        // The entrance heat board: checked hourly, committed only when it changed.
+        store.setSetting('heat-checked-at',String(Date.now()));
+        const heat = await publishHeat(store,publishConfig,fbtSite);
+        if (heat) console.log(heat);
       }
     } catch (error) { console.error('Publishing job failed:', error); }
     finally { publishing = false; }

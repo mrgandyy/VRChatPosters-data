@@ -4,13 +4,36 @@ import type { Store } from './db.js';
 export const URL_POOL_CAPACITY = Number(process.env.WRECKSHOP_URL_POOL_CAPACITY ?? 256);
 if (!Number.isInteger(URL_POOL_CAPACITY) || URL_POOL_CAPACITY < 256 || URL_POOL_CAPACITY > 8192)
   throw new Error('WRECKSHOP_URL_POOL_CAPACITY must be an integer between 256 and 8192.');
-export type PoolKind = 'atlas' | 'billboard' | 'backdrop';
+export type PoolKind = 'atlas' | 'billboard' | 'backdrop' | 'booth';
+// DJ booth fronts (256) were authored separately from the pools above, so raising
+// WRECKSHOP_URL_POOL_CAPACITY does not grow them. Raise this only after the world has more URLs.
+// (The October 2026 dancer-locker pool was retired before it shipped; its old reservations, if any,
+// stay in url_reservations and are simply never read.)
+export const BOOTH_POOL_CAPACITY = Number(process.env.WRECKSHOP_BOOTH_POOL_CAPACITY ?? 256);
+if (!Number.isInteger(BOOTH_POOL_CAPACITY) || BOOTH_POOL_CAPACITY < 1 || BOOTH_POOL_CAPACITY > 8192)
+  throw new Error('WRECKSHOP_BOOTH_POOL_CAPACITY must be an integer between 1 and 8192.');
+/** How many immutable URLs the published world has for this kind. */
+export const poolCapacity = (kind: PoolKind): number => kind === 'booth' ? BOOTH_POOL_CAPACITY : URL_POOL_CAPACITY;
 
 // The world already contains these URLs. Group identity is independent of URL ownership.
 export function assetPath(kind: PoolKind, index: number): string {
-  if (!Number.isInteger(index) || index < 0 || index >= URL_POOL_CAPACITY) throw new Error('Invalid artwork pool index.');
+  if (!Number.isInteger(index) || index < 0 || index >= poolCapacity(kind)) throw new Error('Invalid artwork pool index.');
   const directory = kind === 'atlas' ? 'atlases' : `${kind}s`;
-  return `${directory}/g${String(Math.floor(index / 8)).padStart(2,'0')}-r${String(index % 8 + 1).padStart(2,'0')}.png`;
+  return gridName(directory, index);
+}
+const gridName = (directory: string, index: number) =>
+  `${directory}/g${String(Math.floor(index / 8)).padStart(2,'0')}-r${String(index % 8 + 1).padStart(2,'0')}.png`;
+
+/**
+ * Slot pools: a fixed set of 64 pre-authored URLs where each slot belongs to one owner (a performer, a
+ * Premium group's studio texture) and is overwritten in place when that owner's art changes. Same
+ * g/r naming as the immutable pools: index i is `<folder>/g{i/8:00}-r{i%8+1:00}.png`.
+ */
+export type SlotPoolKind = 'performers' | 'studio';
+export const SLOT_POOL_CAPACITY = 64;
+export function slotPoolPath(kind: SlotPoolKind, index: number): string {
+  if (!Number.isInteger(index) || index < 0 || index >= SLOT_POOL_CAPACITY) throw new Error(`Invalid ${kind} pool index.`);
+  return gridName(kind, index);
 }
 
 export function initializeUrlPool(store: Store, path: string): void {
@@ -50,15 +73,15 @@ export function reserveUrl(store: Store, kind: PoolKind, contentKey: string): nu
   return store.db.transaction(() => {
     const existing = store.db.prepare('SELECT pool_index FROM url_reservations WHERE kind=? AND content_key=?').get(kind,contentKey) as {pool_index:number}|undefined;
     if (existing) {
-      if (existing.pool_index >= URL_POOL_CAPACITY) throw new Error('Authored artwork URL capacity is below an existing reservation; restore the deployed capacity.');
+      if (existing.pool_index >= poolCapacity(kind)) throw new Error('Authored artwork URL capacity is below an existing reservation; restore the deployed capacity.');
       return existing.pool_index;
     }
     const used = new Set((store.db.prepare('SELECT pool_index FROM url_reservations WHERE kind=?').all(kind) as {pool_index:number}[]).map(row=>row.pool_index));
-    for (let index=0;index<URL_POOL_CAPACITY;index++) {
+    for (let index=0;index<poolCapacity(kind);index++) {
       if (used.has(index)) continue;
       store.db.prepare('INSERT INTO url_reservations VALUES(?,?,?)').run(kind,index,contentKey);
       return index;
     }
-    throw new Error(`Authored ${kind} URL capacity exhausted (${URL_POOL_CAPACITY} immutable artwork versions); extend and reupload the world.`);
+    throw new Error(`Authored ${kind} URL capacity exhausted (${poolCapacity(kind)} immutable artwork versions); extend and reupload the world.`);
   })();
 }

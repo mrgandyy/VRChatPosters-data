@@ -16,6 +16,17 @@ Use /poster list to check submissions. /poster remove restores the default for a
 PREMIUM EXTRAS
 Entrance billboard: 4:1, ideally 2048 x 512; /billboard submit.
 Photo-wall backdrop: 4:3, ideally 2048 x 1536; /backdrop submit.
+DJ booth front: 6:1, 2400 x 400; upload on the website (My dashboard > Customize). Shown on both DJ booths while your group is active. A template with the safe area is linked from the upload card.
+
+Venue Studio texture: square 1024 x 1024 (seamless if you can); upload on the website (My dashboard > Customize > Venue Studio). Your studio theme (finish, accent, glow, texture) applies when your code is activated.
+
+PERFORMER STAGE ART (verified performers)
+Verify on the website first (My dashboard: your VRChat profile link, a one-time code in your VRChat bio, and VRChat 18+ age verification).
+Pole wrap: tall 1:2, 512 x 1024; the top of the image is the top of the pole and it wraps all the way around.
+Chair seat-back: square, 512 x 512.
+Deck logo: square, 512 x 512, on a dark background; it glows on the catwalk floor.
+Upload each on the website (My dashboard). Shown in the world whenever you are the one performing.
+
 Set your official VRChat group page with /group page for the entrance join link.
 
 FILES

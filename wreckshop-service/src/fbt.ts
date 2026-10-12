@@ -17,6 +17,8 @@ import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
 import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
+import { PERFORMER_LABEL, isPerformerKind, removePerformer, removePerformerArt, renamePerformer, upsertPerformer } from './performers.js';
+import { setStudioTheme } from './studio.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
 const RULES_VERSION = 'vrchat-rules-v1';
@@ -33,6 +35,8 @@ export interface FbtDeps {
   auditLog: (guild: Guild | null, message: string) => Promise<void>;
   /** Artwork reviews (posters, billboard, backdrop) shared with the slash commands. */
   art?: Art;
+  /** Discord role for verified performers (FBT_DANCER_ROLE_ID); else setting fbt_dancer_role, else a role named "Dancer(s)". */
+  dancerRoleId?: string;
 }
 
 type Reply = ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction;
@@ -390,7 +394,7 @@ export function createFbt(d: FbtDeps) {
           [linkRow(['Collabs', url('/collabs')])]);
         return true;
       case 'posters':
-        await say(i, 'Every registered group gets posters 1–11, at the entrance and in the arrival hall; Premium gets all 32 (the whole club), plus an entrance billboard and a photo-wall backdrop. Use `/poster submit` (one image) or `/poster batch` (up to eight); `/poster map` shows where each number is. Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. Staff review everything before it goes live. `/ws-help` has the details.');
+        await say(i, 'Every registered group gets posters 1–11, at the entrance and in the arrival hall; Premium gets all 32 (the whole club), plus an entrance billboard, a photo-wall backdrop and a DJ booth front. Use `/poster submit` (one image) or `/poster batch` (up to eight); `/poster map` shows where each number is. Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. DJ booth front: 2400 × 400 (upload it on the website, template included). Verified performers upload their pole, chair and deck art on the website too. Staff review everything before it goes live. `/ws-help` has the details.');
         return true;
       case 'cy': case 'cn': {
         await i.deferUpdate();
@@ -621,18 +625,55 @@ export function createFbt(d: FbtDeps) {
     return Boolean(user && await user.send(payload).catch(() => undefined));
   }
 
-  const ART_NOUN: Record<ArtKind, string> = { poster: 'poster', billboard: 'billboard', backdrop: 'photo-wall backdrop' };
+  const ART_NOUN: Record<ArtKind, string> = {
+    poster: 'poster', billboard: 'billboard', backdrop: 'photo-wall backdrop', booth: 'DJ booth front', studio: 'Venue Studio texture',
+    pole: 'pole wrap', chair: 'chair seat-back', deck: 'deck logo',
+  };
   /** A review finished (in Discord or on the website): tell the website and the person who sent it. */
   async function artDecided(kind: ArtKind, id: number, approve: boolean, note?: string): Promise<void> {
     const uploadId = d.art?.uploadFor(kind, id);
     if (uploadId) await sitePost(d.site, '/api/bot/upload/status', { uploadId, status: approve ? 'approved' : 'rejected', reviewId: id, note: note ?? null });
     const r = d.art?.reviewOf(kind, id);
+    if (r && uploadId && isPerformerKind(kind)) {
+      await dm(r.submitter, approve
+        ? `✅ Your ${ART_NOUN[kind]} was approved. It goes on stage with the next publish, usually within a few minutes, whenever you're the one performing. ${url('/me')}`
+        : `Your ${ART_NOUN[kind]} wasn't approved.${note ? `\nStaff note: ${note}` : ''}\nYou can upload a new one any time: ${url('/me')}`);
+      return;
+    }
     const g = r ? store.group(r.groupId) : undefined;
     if (!r || !g || !uploadId) return; // Discord submitters already see the card outcome in /poster list
     const what = kind === 'poster' ? `poster ${r.slot}` : ART_NOUN[kind];
     await dm(r.submitter, approve
       ? `✅ Your ${what} for **${g.name}** was approved. It goes live in the world with the next publish, usually within a few minutes. ${url(`/manage`)}`
       : `Your ${what} for **${g.name}** wasn't approved.${note ? `\nStaff note: ${note}` : ''}\nYou can upload a new one any time: ${url('/manage')}`);
+  }
+
+  /** The dancer role: FBT_DANCER_ROLE_ID, else setting fbt_dancer_role, else a role named "Dancer"/"Dancers"/"FBT Dancer". */
+  function dancerRole(guild: Guild): string | undefined {
+    for (const id of [d.dancerRoleId, store.setting('fbt_dancer_role')]) if (id && guild.roles.cache.has(id)) return id;
+    return guild.roles.cache.find(r => /^(fbt\s*(social\s*)?)?dancers?$/i.test(r.name.trim()))?.id;
+  }
+  /** Gives or takes the dancer role. Returns false when there is no role or the bot can't manage it. */
+  async function setDancerRole(userId: string, on: boolean): Promise<boolean> {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const role = guild && dancerRole(guild);
+    if (!guild || !role) return false;
+    const member = await guild.members.fetch(userId).catch(() => undefined);
+    if (!member) return false;
+    try {
+      if (on && !member.roles.cache.has(role)) await member.roles.add(role, 'FBT Social: verified performer');
+      if (!on && member.roles.cache.has(role)) await member.roles.remove(role, 'FBT Social: off the performer roster');
+      return true;
+    } catch (e) { console.error(`Couldn't ${on ? 'give' : 'take'} the dancer role for ${userId}:`, e instanceof Error ? e.message : e); return false; }
+  }
+  function performerWelcome(name: string) {
+    return new EmbedBuilder().setColor(ROSE).setTitle('Welcome to the FBT Social stage')
+      .setDescription(`You're a verified FBT Social performer as **${name.replace(/[`*_~|<>@\\]/g, '')}**. The dancer role is yours in our Discord.`)
+      .addFields(
+        { name: 'Your stage art', value: `Upload a **${PERFORMER_LABEL.pole.toLowerCase()}** (tall 1:2, 512 × 1024), a **${PERFORMER_LABEL.chair.toLowerCase()}** (square) and a **${PERFORMER_LABEL.deck.toLowerCase()}** (square, dark background) on My dashboard. Staff check each one, then it shows in the world whenever you're the one performing.` },
+        { name: 'Your VRChat name', value: 'The world recognises you by your VRChat display name. If you change it, we pick up the new one automatically within a day.' },
+        { name: 'Nights', value: 'Find nights to dance at on the Strip, and watch #fbt-events for new ones.' })
+      .setFooter({ text: 'FBT Social · the after-dark Strip' });
   }
 
   /** Congratulations + getting started, for a club approved to Premium or Headliner. */
@@ -749,7 +790,11 @@ export function createFbt(d: FbtDeps) {
         try { bytes = await siteBytes(d.site, '/api/bot/upload/fetch', { uploadId: p.uploadId }); }
         catch (e) { if ((e as { status?: number }).status === 404) return; throw e; } // withdrawn on the site
         try {
-          const id = await d.art.submit(p.kind as ArtKind, Number(p.groupId), p.slot == null ? null : Number(p.slot), String(p.by), bytes, String(p.uploadId));
+          if (p.kind === 'locker') { // retired before launch: tell the website, don't review it
+            await sitePost(d.site, '/api/bot/upload/status', { uploadId: p.uploadId, status: 'failed', note: 'Dancer lockers are retired. Upload stage art instead.' });
+            return;
+          }
+          const id = await d.art.submit(p.kind as ArtKind, Number(p.groupId ?? 0), p.slot == null ? null : Number(p.slot), String(p.by), bytes, String(p.uploadId));
           await sitePost(d.site, '/api/bot/upload/status', { uploadId: p.uploadId, status: 'in_review', reviewId: id });
         } catch (e) {
           const message = (e as Error).message;
@@ -813,6 +858,40 @@ export function createFbt(d: FbtDeps) {
         }
         await artDecided(kind, id, Boolean(p.approve), p.note ? String(p.note) : undefined);
         scheduleSync();
+        return;
+      }
+      case 'locker.rename': case 'locker.remove':
+        return; // dancer lockers were retired before launch; anything still queued is dropped
+      case 'performer.verified': {
+        // The website checked the VRChat profile (18+ and the bio code). Roster, dancer role, welcome DM.
+        const user = String(p.user);
+        const perf = upsertPerformer(store, user, String(p.vrcId), String(p.name));
+        const role = await setDancerRole(user, true);
+        await d.auditLog(guild, `💃 <@${user}> is a verified performer (VRChat: ${perf.name.replace(/[`*_~|<>@\\]/g, '')}).${role ? '' : ' No dancer role was given: set FBT_DANCER_ROLE_ID or make a "Dancer" role below the bot.'}`);
+        await dm(user, { embeds: [performerWelcome(perf.name)], components: [linkRow(['My dashboard', url('/me')], ['Upcoming nights', url('/')])] });
+        return;
+      }
+      case 'performer.renamed': {
+        // The poller saw a new display name on the VRChat profile: the world matches performers by it.
+        renamePerformer(store, String(p.vrcId), String(p.name));
+        return;
+      }
+      case 'performer.removed': {
+        const perf = removePerformer(store, String(p.vrcId));
+        if (!perf) return;
+        await setDancerRole(perf.discordId, false);
+        await d.auditLog(guild, `Performer <@${perf.discordId}> taken off the roster${p.by && p.by !== perf.discordId ? ` by <@${p.by}>` : ''} on the website. Their slot is free again.`);
+        return;
+      }
+      case 'performer.art.remove': {
+        if (isPerformerKind(String(p.kind))) removePerformerArt(store, String(p.user), p.kind);
+        return;
+      }
+      case 'studio.set': {
+        // Venue Studio theme saved on the website (null clears it). Only the catalog changes.
+        const groupId = Number(p.groupId);
+        if (!store.group(groupId)) return;
+        setStudioTheme(store, groupId, p.theme ?? null);
         return;
       }
       case 'club.register': {
