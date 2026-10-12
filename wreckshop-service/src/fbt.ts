@@ -17,6 +17,7 @@ import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
 import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
+import { removeLocker, renameLocker } from './locker.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
 const RULES_VERSION = 'vrchat-rules-v1';
@@ -390,7 +391,7 @@ export function createFbt(d: FbtDeps) {
           [linkRow(['Collabs', url('/collabs')])]);
         return true;
       case 'posters':
-        await say(i, 'Every registered group gets posters 1–11, at the entrance and in the arrival hall; Premium gets all 32 (the whole club), plus an entrance billboard and a photo-wall backdrop. Use `/poster submit` (one image) or `/poster batch` (up to eight); `/poster map` shows where each number is. Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. Staff review everything before it goes live. `/ws-help` has the details.');
+        await say(i, 'Every registered group gets posters 1–11, at the entrance and in the arrival hall; Premium gets all 32 (the whole club), plus an entrance billboard, a photo-wall backdrop and a DJ booth front. Use `/poster submit` (one image) or `/poster batch` (up to eight); `/poster map` shows where each number is. Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. DJ booth front: 2400 × 400 (upload it on the website, template included). Dancers can upload their own locker (500 × 700) on the website too. Staff review everything before it goes live. `/ws-help` has the details.');
         return true;
       case 'cy': case 'cn': {
         await i.deferUpdate();
@@ -621,12 +622,18 @@ export function createFbt(d: FbtDeps) {
     return Boolean(user && await user.send(payload).catch(() => undefined));
   }
 
-  const ART_NOUN: Record<ArtKind, string> = { poster: 'poster', billboard: 'billboard', backdrop: 'photo-wall backdrop' };
+  const ART_NOUN: Record<ArtKind, string> = { poster: 'poster', billboard: 'billboard', backdrop: 'photo-wall backdrop', booth: 'DJ booth front', locker: 'dancer locker' };
   /** A review finished (in Discord or on the website): tell the website and the person who sent it. */
   async function artDecided(kind: ArtKind, id: number, approve: boolean, note?: string): Promise<void> {
     const uploadId = d.art?.uploadFor(kind, id);
     if (uploadId) await sitePost(d.site, '/api/bot/upload/status', { uploadId, status: approve ? 'approved' : 'rejected', reviewId: id, note: note ?? null });
     const r = d.art?.reviewOf(kind, id);
+    if (r && uploadId && kind === 'locker') {
+      await dm(r.submitter, approve
+        ? `✅ Your dancer locker was approved. It shows in the backstage studio after the next publish, usually within a few minutes. Only you see it, when your VRChat display name matches the one you entered. ${url('/me')}`
+        : `Your dancer locker wasn't approved.${note ? `\nStaff note: ${note}` : ''}\nYou can upload a new one any time: ${url('/me')}`);
+      return;
+    }
     const g = r ? store.group(r.groupId) : undefined;
     if (!r || !g || !uploadId) return; // Discord submitters already see the card outcome in /poster list
     const what = kind === 'poster' ? `poster ${r.slot}` : ART_NOUN[kind];
@@ -749,7 +756,8 @@ export function createFbt(d: FbtDeps) {
         try { bytes = await siteBytes(d.site, '/api/bot/upload/fetch', { uploadId: p.uploadId }); }
         catch (e) { if ((e as { status?: number }).status === 404) return; throw e; } // withdrawn on the site
         try {
-          const id = await d.art.submit(p.kind as ArtKind, Number(p.groupId), p.slot == null ? null : Number(p.slot), String(p.by), bytes, String(p.uploadId));
+          const id = await d.art.submit(p.kind as ArtKind, Number(p.groupId ?? 0), p.slot == null ? null : Number(p.slot), String(p.by), bytes, String(p.uploadId),
+            p.vrcName == null ? undefined : String(p.vrcName));
           await sitePost(d.site, '/api/bot/upload/status', { uploadId: p.uploadId, status: 'in_review', reviewId: id });
         } catch (e) {
           const message = (e as Error).message;
@@ -813,6 +821,16 @@ export function createFbt(d: FbtDeps) {
         }
         await artDecided(kind, id, Boolean(p.approve), p.note ? String(p.note) : undefined);
         scheduleSync();
+        return;
+      }
+      case 'locker.rename': {
+        // A dancer edited the VRChat display name on their locker; the same art follows the new name.
+        try { renameLocker(store, String(p.user), String(p.vrcName)); }
+        catch (e) { throw Object.assign(new Error((e as Error).message), { permanent: true }); }
+        return;
+      }
+      case 'locker.remove': {
+        if (removeLocker(store, String(p.user))) await d.auditLog(guild, `Dancer locker for <@${p.user}> taken down${p.by && p.by !== p.user ? ` by <@${p.by}>` : ''} on the website.`);
         return;
       }
       case 'club.register': {

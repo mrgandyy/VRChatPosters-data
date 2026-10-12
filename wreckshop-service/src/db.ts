@@ -2,6 +2,8 @@ import { initializeBackdrops } from './backdrop.js';
 import { normalizeGroupLink, isGroupReference, validateGroupName } from './group-link.js';
 import Database from 'better-sqlite3';
 import { initializeBillboards } from './billboard.js';
+import { initializeBooths } from './booth.js';
+import { initializeLockers } from './locker.js';
 import { randomInt } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -63,6 +65,8 @@ export class Store {
     this.migratePosterNumbering(path);
     initializeBillboards(this);
     initializeBackdrops(this);
+    initializeBooths(this);
+    initializeLockers(this);
     const columns = this.db.prepare('PRAGMA table_info(groups)').all() as { name:string }[];
     if(path!==':memory:' && !columns.some(column=>column.name==='deleted'))
       this.db.prepare('VACUUM INTO ?').run(`${path}.before-group-management-${Date.now()}.sqlite`);

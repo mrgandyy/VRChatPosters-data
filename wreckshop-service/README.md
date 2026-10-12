@@ -1,5 +1,14 @@
 # Wreckshop Worlds service
 
+## World update: DJ booth fronts, dancer lockers, heat board (12 October 2026)
+
+Needs the matching world update; older worlds ignore the new files and catalog fields.
+
+- **DJ booth fronts (Premium):** uploaded on the website (Customize), reviewed with the same Discord card buttons (`ws:boothapprove` / `ws:boothreject`) or on the website. Approved art is fitted into a **2400 × 400** PNG and published to the `booths/` pool (`booths/gNN-rNN.png`, 256 URLs, `WRECKSHOP_BOOTH_POOL_CAPACITY`). Every catalog group has `boothPoolIndex` (-1 when none, suspended or not premium).
+- **Headliner flag:** every catalog group has `headliner` (true only for premium groups with `level='headliner'`); `tier` stays `premium`.
+- **Dancer lockers:** any signed-in member uploads one on the website (My dashboard → Your locker) with their exact VRChat display name. Reviewed like other art (`ws:lockerapprove` / `ws:lockerreject`). Approved art is fitted into **500 × 700** and published to the `lockers/` pool (128 URLs, `WRECKSHOP_LOCKER_POOL_CAPACITY`), then `lockers/lockers.json` = `{"lockers":[{"name":"<VRChat display name>","pool":<slot>}]}` lists approved lockers only. One locker per Discord account and one per name (case-insensitive). Renames and take-downs arrive from the website outbox (`locker.rename`, `locker.remove`). Lockers publish on their own after group jobs (`lockers-dirty`); commit messages carry the slot number only, never the name. Every new image uses a fresh immutable URL, so watch `/publish status` (locker pool warning at 80%).
+- **Heat board:** every `FBT_HEAT_INTERVAL_MINUTES` (default 60) the bot asks the website for `/api/bot/heat`, re-checks it (positive momentum words only, no ranks, at most 40 clubs) and publishes `heat.json` at the Pages root when anything but the timestamp changed. `supporters.vip` is always empty until the owner decides where VIP names come from.
+
 ## FBT Social website link (11 October 2026)
 
 The bot is the Discord front door for the FBT Social website (`fbt-social-web` on Railway).

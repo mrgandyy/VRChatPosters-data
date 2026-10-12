@@ -16,6 +16,10 @@ Use /poster list to check submissions. /poster remove restores the default for a
 PREMIUM EXTRAS
 Entrance billboard: 4:1, ideally 2048 x 512; /billboard submit.
 Photo-wall backdrop: 4:3, ideally 2048 x 1536; /backdrop submit.
+DJ booth front: 6:1, 2400 x 400; upload on the website (My dashboard > Customize). Shown on both DJ booths while your group is active. A template with the safe area is linked from the upload card.
+
+DANCER LOCKERS
+Portrait 5:7, 500 x 700; upload on the website (My dashboard > Your locker). Enter your exact VRChat display name: the world shows the locker only to the player with that name. One locker per Discord account; each name can have one locker.
 Set your official VRChat group page with /group page for the entrance join link.
 
 FILES

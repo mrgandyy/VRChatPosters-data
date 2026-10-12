@@ -46,16 +46,18 @@ export async function siteBytes(c: SiteConfig, path: string, payload: unknown, t
   return Buffer.from(await res.arrayBuffer());
 }
 
-/** Which custom art each group has approved: poster numbers, billboard, backdrop. */
-export function artOf(store: Store): Map<number, { posters: number[]; billboard: boolean; backdrop: boolean }> {
-  const out = new Map<number, { posters: number[]; billboard: boolean; backdrop: boolean }>();
-  const get = (g: number) => { let a = out.get(g); if (!a) out.set(g, a = { posters: [], billboard: false, backdrop: false }); return a; };
+export interface GroupArt { posters: number[]; billboard: boolean; backdrop: boolean; booth: boolean }
+/** Which custom art each group has approved: poster numbers, billboard, backdrop, DJ booth front. */
+export function artOf(store: Store): Map<number, GroupArt> {
+  const out = new Map<number, GroupArt>();
+  const get = (g: number) => { let a = out.get(g); if (!a) out.set(g, a = { posters: [], billboard: false, backdrop: false, booth: false }); return a; };
   for (const r of store.db.prepare('SELECT group_id AS g, slot FROM assignments ORDER BY slot').all() as { g: number; slot: number }[]) get(r.g).posters.push(r.slot);
-  const flag = (table: string, key: 'billboard' | 'backdrop') => {
+  const flag = (table: string, key: 'billboard' | 'backdrop' | 'booth') => {
     try { for (const r of store.db.prepare(`SELECT groupId AS g FROM ${table}`).all() as { g: number }[]) get(r.g)[key] = true; } catch { /* table not created yet */ }
   };
   flag('billboard_assignments', 'billboard');
   flag('backdrop_assignments', 'backdrop');
+  flag('booth_assignments', 'booth');
   return out;
 }
 
@@ -101,7 +103,7 @@ export function syncPayload(store: Store, staff?: string[], names?: Map<string, 
       reps: (byGroup.get(g.id) ?? []).filter(u => /^\d{5,25}$/.test(u)),
       code: /^\d{8}$/.test(g.code) ? g.code : undefined,
       repNames: Object.fromEntries((byGroup.get(g.id) ?? []).flatMap(u => names?.get(u) ? [[u, names.get(u)!.slice(0, 64)]] : [])),
-      art: art.get(g.id) ?? { posters: [], billboard: false, backdrop: false },
+      art: art.get(g.id) ?? { posters: [], billboard: false, backdrop: false, booth: false },
     })),
     ...(staff ? { staff: [...new Set(staff)].filter(u => /^\d{5,25}$/.test(u)).slice(0, 200) } : {}),
     // Who is in the Discord server and who has the Verified role: the website uses it to guide
