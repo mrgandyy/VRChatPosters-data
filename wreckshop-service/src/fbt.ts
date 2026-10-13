@@ -13,6 +13,7 @@ import { groupVerified, siteBytes, sitePost, siteEnabled, statusLabel, syncGroup
 import { applyAdmin, setLevel, type AdminAction } from './fbt-admin.js';
 import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
+import { hasLineup, lineupMessage, type LineupView } from './fbt-lineup.js';
 import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
 import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
@@ -45,6 +46,25 @@ type Whois = { mine: { id: number; name: string; status: string }[]; partners: {
 export function createFbt(d: FbtDeps) {
   const { store } = d;
   const url = (path: string) => `${d.publicUrl.replace(/\/$/, '')}${path}`;
+
+  /** Draw (or redraw) an event's interactive lineup post from the website's current lineup. */
+  async function lineupPost(eventId: string): Promise<{ view: LineupView; message: ReturnType<typeof lineupMessage> } | undefined> {
+    const r = await sitePost<LineupView>(d.site, '/api/bot/lineup', { action: 'view', event: eventId });
+    if (!r.ok) return undefined;
+    return { view: r.data, message: lineupMessage(r.data, url(`/e/${eventId}`)) };
+  }
+  /** Edit the stored lineup message for an event, if the bot posted one. */
+  async function refreshLineup(eventId: string): Promise<void> {
+    const where = store.setting(`lineup-msg:${eventId}`);
+    if (!where) return;
+    const [channelId, messageId] = where.split(':');
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const ch = guild?.channels.cache.get(channelId!);
+    if (ch?.type !== ChannelType.GuildText) return;
+    const msg = await ch.messages.fetch(messageId!).catch(() => undefined);
+    const post = await lineupPost(eventId);
+    if (msg && post) await msg.edit(post.message).catch((e: Error) => console.error('Lineup refresh failed:', e.message));
+  }
   const groupOf = (userId: string): Group | undefined => store.representedGroups(userId)[0];
   const tzOf = (userId: string) => store.setting(`fbt-tz-${userId}`);
 
@@ -396,6 +416,25 @@ export function createFbt(d: FbtDeps) {
       case 'posters':
         await say(i, 'Every registered group gets posters 1–11, at the entrance and in the arrival hall; Premium gets all 32 (the whole club), plus an entrance billboard, a photo-wall backdrop and a DJ booth front. Use `/poster submit` (one image) or `/poster batch` (up to eight); `/poster map` shows where each number is. Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. DJ booth front: 2400 × 400 (upload it on the website, template included). Verified performers upload their pole, chair and deck art on the website too. Staff review everything before it goes live. `/ws-help` has the details.');
         return true;
+      case 'luc': case 'lur': case 'luj': case 'lul': {
+        // One-tap lineup buttons: the website checks the performer is verified and applies the rules.
+        await i.deferReply({ flags: EPHEMERAL });
+        const body = action === 'luc' ? { action: 'claim', actor: i.user.id, slot: arg }
+          : action === 'lur' ? { action: 'releaseMine', actor: i.user.id, event: arg }
+          : action === 'luj' ? { action: 'join', actor: i.user.id, event: arg }
+          : { action: 'leave', actor: i.user.id, event: arg };
+        const r = await sitePost<{ message?: string }>(d.site, '/api/bot/lineup', body);
+        await i.editReply(r.ok ? `✅ ${r.data.message ?? 'Done.'}` : `⚠️ ${r.error}`);
+        if (r.ok) {
+          // Redraw this post right away (the outbox refresh catches any other post for the event).
+          const id = action === 'luc' ? i.message.embeds[0]?.url?.split('/e/')[1] : arg;
+          if (id) {
+            const post = await lineupPost(id);
+            if (post) await i.message.edit(post.message).catch(() => undefined);
+          }
+        }
+        return true;
+      }
       case 'cy': case 'cn': {
         await i.deferUpdate();
         const r = await sitePost<{ status: string; title: string }>(d.site, '/api/bot/collab', { action: action === 'cy' ? 'accept' : 'decline', actor: i.user.id, collabId: arg });
@@ -739,7 +778,14 @@ export function createFbt(d: FbtDeps) {
             .setTitle(p.title).setURL(url(`/v/${p.groupSlug}`))
             .setDescription(`${headliner ? '👑 **Headliner** · ' : ''}**${p.groupName}** · ${discordTime(start)} (${discordTime(start, 'R')})${p.description ? `\n\n${p.description}` : ''}`)
             .setFooter({ text: 'FBT Social · RSVP on the Strip' });
-          await events.send({ embeds: [embed], components: [linkRow(['RSVP on the Strip', url(`/v/${p.groupSlug}`)])] });
+          // Events with a lineup get the interactive post (claimable DJ sets, join-the-roster button).
+          const post = hasLineup(p) ? await lineupPost(String(p.eventId)) : undefined;
+          if (post) {
+            const sent = await events.send(post.message);
+            store.setSetting(`lineup-msg:${p.eventId}`, `${sent.channelId}:${sent.id}`);
+          } else {
+            await events.send({ embeds: [embed], components: [linkRow(['RSVP on the Strip', url(`/v/${p.groupSlug}`)])] });
+          }
         }
         if (guild?.members.me?.permissions.has(PermissionFlagsBits.ManageEvents) && start > Date.now() + 60_000) {
           const ev = await guild.scheduledEvents.create({
@@ -749,6 +795,10 @@ export function createFbt(d: FbtDeps) {
           }).catch(e => { console.error('Scheduled event failed:', e.message); return undefined; });
           if (ev) await sitePost(d.site, '/api/bot/event', { action: 'linked', eventId: p.eventId, discordEventId: ev.id });
         }
+        return;
+      }
+      case 'event.lineup': {
+        await refreshLineup(String(p.eventId));
         return;
       }
       case 'event.cancelled': {
