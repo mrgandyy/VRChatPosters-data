@@ -14,6 +14,7 @@ import { applyAdmin, setLevel, type AdminAction } from './fbt-admin.js';
 import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import { hasLineup, lineupMessage, type LineupView } from './fbt-lineup.js';
+import { inviteDeclinedDm, inviteDm, introHost, introPerformer, leftHost, pausedDm, reminderHost, reminderPerformer, talentCallMessage, type Call, type Invite, type Joined, type Reminder } from './fbt-talent.js';
 import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
 import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
@@ -437,6 +438,14 @@ export function createFbt(d: FbtDeps) {
         }
         return true;
       }
+      case 'tia': case 'tid': {
+        // An invite DM: "I'm in" claims the spot through the website (same rules as everywhere else).
+        await i.deferReply({ flags: EPHEMERAL });
+        const r = await sitePost<{ message?: string }>(d.site, '/api/bot/talent', { action: action === 'tia' ? 'accept' : 'decline', actor: i.user.id, invite: arg });
+        await i.editReply(r.ok ? `✅ ${r.data.message ?? 'Done.'}` : `⚠️ ${r.error}`);
+        if (r.ok) await i.message.edit({ components: i.message.components.length ? [linkRow(['Event page', i.message.embeds[0]?.url ?? url('/playbill')])] : [] }).catch(() => undefined);
+        return true;
+      }
       case 'cy': case 'cn': {
         await i.deferUpdate();
         const r = await sitePost<{ status: string; title: string }>(d.site, '/api/bot/collab', { action: action === 'cy' ? 'accept' : 'decline', actor: i.user.id, collabId: arg });
@@ -803,7 +812,7 @@ export function createFbt(d: FbtDeps) {
             const sent = await events.send(post.message);
             store.setSetting(`lineup-msg:${p.eventId}`, `${sent.channelId}:${sent.id}`);
           } else {
-            await events.send({ embeds: [embed], components: [linkRow(['RSVP on the Strip', url(`/v/${p.groupSlug}`)])] });
+            await events.send({ embeds: [embed.setURL(url(`/e/${p.eventId}`))], components: [linkRow(['Event page & RSVP', url(`/e/${p.eventId}`)], ['Club page', url(`/v/${p.groupSlug}`)])] });
           }
         }
         if (guild?.members.me?.permissions.has(PermissionFlagsBits.ManageEvents) && start > Date.now() + 60_000) {
@@ -818,6 +827,48 @@ export function createFbt(d: FbtDeps) {
       }
       case 'event.lineup': {
         await refreshLineup(String(p.eventId));
+        return;
+      }
+      case 'lineup.joined': {
+        // The intro: the host hears who signed up (whoever posted the night first, then the club's
+        // reps if they can't be reached), and the performer gets the night, the host and next steps.
+        const j = p as Joined;
+        const hosts = (j.hosts ?? []).filter((h) => h !== j.performer.id);
+        for (const h of hosts) if (await dm(h, introHost(j, url))) break;
+        await dm(j.performer.id, introPerformer(j, url));
+        return;
+      }
+      case 'lineup.left': {
+        const j = p as Joined;
+        for (const h of (j.hosts ?? []).filter((x) => x !== j.performer.id)) if (await dm(h, leftHost(j, url))) break;
+        return;
+      }
+      case 'lineup.reminder': {
+        const r = p as Reminder;
+        for (const perf of r.performers ?? []) await dm(perf.id, reminderPerformer(r, perf, url));
+        for (const h of r.hosts ?? []) if (await dm(h, reminderHost(r, url))) break;
+        return;
+      }
+      case 'talent.invite': {
+        const v = p as Invite;
+        const sent = await dm(v.performer.id, inviteDm(v, url));
+        if (!sent) await dm(v.by, { content: `We couldn't DM **${String(v.performer.name).replace(/[`*_~|<>@\\]/g, '')}** (their DMs are closed). Send them the event page yourself: ${url(`/e/${v.eventId}`)}`, allowedMentions: { parse: [] } });
+        return;
+      }
+      case 'talent.invite.answer': {
+        if (!p.accepted) await dm(String(p.to), inviteDeclinedDm({ performer: String(p.performer), title: String(p.title), eventId: String(p.eventId) }, url));
+        return;
+      }
+      case 'talent.call': {
+        // Open spots go to the talent channel (made on first use), pinging the Dancer and/or DJ role.
+        if (!guild) throw new Error('Not in the server.');
+        const ch = channel('fbt_talent_channel') ?? await ensureChannel(guild, 'fbt_talent_channel', 'talent-calls', true);
+        const c = p as Call;
+        await ch.send(talentCallMessage(c, { dancer: performerRole(guild, 'dancer'), dj: performerRole(guild, 'dj') }, url));
+        return;
+      }
+      case 'talent.paused': {
+        await dm(String(p.user), pausedDm({ days: Number(p.days), until: String(p.until), count: Number(p.count), windowDays: Number(p.windowDays) }, url));
         return;
       }
       case 'event.cancelled': {
