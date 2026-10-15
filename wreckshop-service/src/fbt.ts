@@ -18,7 +18,7 @@ import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
 import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
-import { PERFORMER_LABEL, isPerformerKind, removePerformer, removePerformerArt, renamePerformer, upsertPerformer } from './performers.js';
+import { PERFORMER_LABEL, isPerformerKind, performerByDiscord, removePerformer, removePerformerArt, renamePerformer, upsertPerformer } from './performers.js';
 import { setStudioTheme } from './studio.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
@@ -38,6 +38,8 @@ export interface FbtDeps {
   art?: Art;
   /** Discord role for verified performers (FBT_DANCER_ROLE_ID); else setting fbt_dancer_role, else a role named "Dancer(s)". */
   dancerRoleId?: string;
+  /** Discord role for verified DJs (FBT_DJ_ROLE_ID); else setting fbt_dj_role, else a role named "DJ(s)". */
+  djRoleId?: string;
 }
 
 type Reply = ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction;
@@ -687,31 +689,48 @@ export function createFbt(d: FbtDeps) {
       : `Your ${what} for **${g.name}** wasn't approved.${note ? `\nStaff note: ${note}` : ''}\nYou can upload a new one any time: ${url('/manage')}`);
   }
 
-  /** The dancer role: FBT_DANCER_ROLE_ID, else setting fbt_dancer_role, else a role named "Dancer"/"Dancers"/"FBT Dancer". */
-  function dancerRole(guild: Guild): string | undefined {
-    for (const id of [d.dancerRoleId, store.setting('fbt_dancer_role')]) if (id && guild.roles.cache.has(id)) return id;
-    return guild.roles.cache.find(r => /^(fbt\s*(social\s*)?)?dancers?$/i.test(r.name.trim()))?.id;
+  /**
+   * A performer role: the env id (FBT_DANCER_ROLE_ID / FBT_DJ_ROLE_ID), else the setting
+   * (fbt_dancer_role / fbt_dj_role), else a role named "Dancer"/"Dancers"/"FBT Dancer" or "DJ"/"DJs"/"FBT DJ".
+   */
+  type PerfRole = 'dancer' | 'dj';
+  const ROLE_NAME: Record<PerfRole, RegExp> = { dancer: /^(fbt\s*(social\s*)?)?dancers?$/i, dj: /^(fbt\s*(social\s*)?)?djs?$/i };
+  function performerRole(guild: Guild, kind: PerfRole): string | undefined {
+    const ids = kind === 'dancer' ? [d.dancerRoleId, store.setting('fbt_dancer_role')] : [d.djRoleId, store.setting('fbt_dj_role')];
+    for (const id of ids) if (id && guild.roles.cache.has(id)) return id;
+    return guild.roles.cache.find(r => ROLE_NAME[kind].test(r.name.trim()))?.id;
   }
-  /** Gives or takes the dancer role. Returns false when there is no role or the bot can't manage it. */
-  async function setDancerRole(userId: string, on: boolean): Promise<boolean> {
+  /** Give or take the Dancer and DJ roles to match what the performer does. Returns the roles it couldn't find. */
+  async function setPerformerRoles(userId: string, want: Record<PerfRole, boolean>): Promise<PerfRole[]> {
     const guild = d.client.guilds.cache.get(d.guildId);
-    const role = guild && dancerRole(guild);
-    if (!guild || !role) return false;
+    if (!guild) return ['dancer', 'dj'].filter(k => want[k as PerfRole]) as PerfRole[];
     const member = await guild.members.fetch(userId).catch(() => undefined);
-    if (!member) return false;
-    try {
-      if (on && !member.roles.cache.has(role)) await member.roles.add(role, 'FBT Social: verified performer');
-      if (!on && member.roles.cache.has(role)) await member.roles.remove(role, 'FBT Social: off the performer roster');
-      return true;
-    } catch (e) { console.error(`Couldn't ${on ? 'give' : 'take'} the dancer role for ${userId}:`, e instanceof Error ? e.message : e); return false; }
+    const missing: PerfRole[] = [];
+    for (const kind of ['dancer', 'dj'] as PerfRole[]) {
+      const role = performerRole(guild, kind);
+      if (!role) { if (want[kind]) missing.push(kind); continue; }
+      if (!member) continue;
+      try {
+        if (want[kind] && !member.roles.cache.has(role)) await member.roles.add(role, `FBT Social: verified ${kind === 'dj' ? 'DJ' : 'dancer'}`);
+        if (!want[kind] && member.roles.cache.has(role)) await member.roles.remove(role, `FBT Social: no longer a ${kind === 'dj' ? 'DJ' : 'dancer'} on the roster`);
+      } catch (e) { console.error(`Couldn't update the ${kind} role for ${userId}:`, e instanceof Error ? e.message : e); missing.push(kind); }
+    }
+    return missing;
   }
-  function performerWelcome(name: string) {
+  /** What the website says this performer does. Older items carry no roles: they were dancers. */
+  const rolesOf = (raw: unknown): Record<PerfRole, boolean> => {
+    const list = Array.isArray(raw) ? raw.map(String) : ['dancer'];
+    return { dancer: list.includes('dancer'), dj: list.includes('dj') };
+  };
+  const roleWords = (r: Record<PerfRole, boolean>) => [r.dancer && 'dancer', r.dj && 'DJ'].filter(Boolean).join(' and ') || 'performer';
+
+  function performerWelcome(name: string, roles: Record<PerfRole, boolean>) {
     return new EmbedBuilder().setColor(ROSE).setTitle('Welcome to the FBT Social stage')
-      .setDescription(`You're a verified FBT Social performer as **${name.replace(/[`*_~|<>@\\]/g, '')}**. The dancer role is yours in our Discord.`)
+      .setDescription(`You're a verified FBT Social ${roleWords(roles)} as **${name.replace(/[`*_~|<>@\\]/g, '')}**. The ${roleWords(roles)} role${roles.dancer && roles.dj ? 's are' : ' is'} yours in our Discord. You can change what you perform as any time on My dashboard.`)
       .addFields(
         { name: 'Your stage art', value: `Upload a **${PERFORMER_LABEL.pole.toLowerCase()}** (tall 1:2, 512 × 1024), a **${PERFORMER_LABEL.chair.toLowerCase()}** (square) and a **${PERFORMER_LABEL.deck.toLowerCase()}** (square, dark background) on My dashboard. Staff check each one, then it shows in the world whenever you're the one performing.` },
         { name: 'Your VRChat name', value: 'The world recognises you by your VRChat display name. If you change it, we pick up the new one automatically within a day.' },
-        { name: 'Nights', value: 'Find nights to dance at on the Strip, and watch #fbt-events for new ones.' })
+        { name: 'Nights', value: roles.dj ? 'Claim DJ sets and join dancer rosters on the Playbill, and watch #fbt-events for new nights.' : 'Find nights to dance at on the Playbill, and watch #fbt-events for new ones.' })
       .setFooter({ text: 'FBT Social · the after-dark Strip' });
   }
 
@@ -913,12 +932,23 @@ export function createFbt(d: FbtDeps) {
       case 'locker.rename': case 'locker.remove':
         return; // dancer lockers were retired before launch; anything still queued is dropped
       case 'performer.verified': {
-        // The website checked the VRChat profile (18+ and the bio code). Roster, dancer role, welcome DM.
+        // The website verified the VRChat account (18+, and a friend request from it to the tracker
+        // account, or staff by hand). Roster, Dancer/DJ roles, welcome DM.
         const user = String(p.user);
+        const roles = rolesOf(p.roles);
         const perf = upsertPerformer(store, user, String(p.vrcId), String(p.name));
-        const role = await setDancerRole(user, true);
-        await d.auditLog(guild, `💃 <@${user}> is a verified performer (VRChat: ${perf.name.replace(/[`*_~|<>@\\]/g, '')}).${role ? '' : ' No dancer role was given: set FBT_DANCER_ROLE_ID or make a "Dancer" role below the bot.'}`);
-        await dm(user, { embeds: [performerWelcome(perf.name)], components: [linkRow(['My dashboard', url('/me')], ['Upcoming nights', url('/')])] });
+        const missing = await setPerformerRoles(user, roles);
+        await d.auditLog(guild, `💃 <@${user}> is a verified ${roleWords(roles)} (VRChat: ${perf.name.replace(/[`*_~|<>@\\]/g, '')}).${missing.length ? ` No ${missing.map(k => k === 'dj' ? 'DJ' : 'Dancer').join(' or ')} role was given: make a role named ${missing.map(k => k === 'dj' ? '"DJ"' : '"Dancer"').join(' and ')} below the bot.` : ''}`);
+        await dm(user, { embeds: [performerWelcome(perf.name, roles)], components: [linkRow(['My dashboard', url('/me')], ['Upcoming nights', url('/playbill')])] });
+        return;
+      }
+      case 'performer.roles': {
+        // A verified performer changed what they perform as on My dashboard: match the Discord roles.
+        const user = String(p.user);
+        if (!performerByDiscord(store, user)) return;
+        const roles = rolesOf(p.roles);
+        const missing = await setPerformerRoles(user, roles);
+        if (missing.length) await d.auditLog(guild, `<@${user}> is now a ${roleWords(roles)}, but there's no ${missing.map(k => k === 'dj' ? '"DJ"' : '"Dancer"').join(' or ')} role below the bot to give.`);
         return;
       }
       case 'performer.renamed': {
@@ -929,7 +959,7 @@ export function createFbt(d: FbtDeps) {
       case 'performer.removed': {
         const perf = removePerformer(store, String(p.vrcId));
         if (!perf) return;
-        await setDancerRole(perf.discordId, false);
+        await setPerformerRoles(perf.discordId, { dancer: false, dj: false });
         await d.auditLog(guild, `Performer <@${perf.discordId}> taken off the roster${p.by && p.by !== perf.discordId ? ` by <@${p.by}>` : ''} on the website. Their slot is free again.`);
         return;
       }
