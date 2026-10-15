@@ -323,12 +323,12 @@ export function createFbt(d: FbtDeps) {
         '**1 · Get the Verified role:** verify in the verify channel with our 18+ verify bot. Everything below unlocks once you have it.',
         '**2 · Register your club:** free, one minute. You get a club number and a door code for the world.',
         '**3 · Make it yours:** posters, logo, banner, gallery and your colour. Sign in at fbtsocial.com and open **My dashboard** (top right): it\'s your club\'s control panel.',
-        '**4 · Host a night:** post it and it\'s announced here and lit up on the Strip. Crowds earn heat for the season.',
+        '**4 · Host a night:** post it and it\'s announced here and goes up on the Playbill. Crowds earn heat for the season.',
         '**5 · Collab:** team up with another club and you both earn the night\'s heat, plus a bonus.',
         '**6 · Premium or Headliner:** apply any time. Premium clubs run **age-verified (18+) rooms** and let our tracker **fbtheat** into their VRChat group.',
         '',
         '**Season 1 · Founders** runs Oct 12–31: every club that earns heat keeps a **Founding Venue** badge for good.',
-        'Just here to party? Find tonight\'s nights on the Strip.',
+        'Just here to party? Find tonight\'s nights on the Playbill.',
       ].join('\n'))
       .setURL(url('/start'));
   }
@@ -342,7 +342,7 @@ export function createFbt(d: FbtDeps) {
         new ButtonBuilder().setCustomId('fbt:host').setLabel('Host a night').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('fbt:collab').setLabel('Start a collab').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('fbt:posters').setLabel('Posters & billboards').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setLabel('The Strip').setStyle(ButtonStyle.Link).setURL(url('/'))),
+        new ButtonBuilder().setLabel('The website').setStyle(ButtonStyle.Link).setURL(url('/'))),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setLabel('My dashboard').setStyle(ButtonStyle.Link).setURL(url('/me')),
         new ButtonBuilder().setLabel('Leaderboard').setStyle(ButtonStyle.Link).setURL(url('/leaderboard')),
@@ -375,7 +375,7 @@ export function createFbt(d: FbtDeps) {
     const rows = [new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary),
       ...(start ? [new ButtonBuilder().setLabel('Open start-here').setStyle(ButtonStyle.Link).setURL(`https://discord.com/channels/${member.guild.id}/${start.id}`)] : []),
-      new ButtonBuilder().setLabel('The Strip').setStyle(ButtonStyle.Link).setURL(url('/start')))];
+      new ButtonBuilder().setLabel('Get started on the site').setStyle(ButtonStyle.Link).setURL(url('/start')))];
     await member.send({ embeds: [startEmbed()], components: rows }).catch(() => undefined); // closed DMs are fine
   }
 
@@ -502,7 +502,7 @@ export function createFbt(d: FbtDeps) {
         return true;
       case 'host':
         if (await requireVerified(i)) return true;
-        await say(i, 'Post your event on the website (easiest), or here with `/event create`. It shows up on the Strip\'s Coming Up view and gets announced in Discord.',
+        await say(i, 'Post your event on the website (easiest), or here with `/event create`. It goes up on the Playbill and gets announced in Discord.',
           [linkRow(['Host a night', url('/host')])]);
         return true;
       case 'collab':
@@ -639,8 +639,8 @@ export function createFbt(d: FbtDeps) {
     new SlashCommandBuilder().setName('apply').setDescription('Apply for Premium or Headliner')
       .addStringOption(o => o.setName('level').setDescription('What you are applying for').setRequired(true)
         .addChoices({ name: 'Premium', value: 'premium' }, { name: 'Headliner', value: 'headliner' })),
-    new SlashCommandBuilder().setName('event').setDescription('Your group\'s events on the Strip')
-      .addSubcommand(s => s.setName('create').setDescription('Post an event (announced here and on the Strip)')
+    new SlashCommandBuilder().setName('event').setDescription('Your group\'s events on the Playbill')
+      .addSubcommand(s => s.setName('create').setDescription('Post an event (announced here and on the Playbill)')
         .addStringOption(o => o.setName('title').setDescription('Show name').setRequired(true).setMaxLength(60))
         .addStringOption(o => o.setName('date').setDescription('friday, tomorrow, 10/17 …').setRequired(true).setMaxLength(20))
         .addStringOption(o => o.setName('time').setDescription('9pm, 21:00 …').setRequired(true).setMaxLength(10))
@@ -711,7 +711,7 @@ export function createFbt(d: FbtDeps) {
           description: i.options.getString('description') ?? '', start: new Date(when.start).toISOString(), end: new Date(when.end).toISOString(),
           partners: partner ? [partner] : [],
         });
-        await i.editReply(!r.ok ? `⚠️ ${r.error}` : `Posted for ${discordTime(when.start)}. It'll be announced in the events channel and is on the Strip's Coming Up view.${
+        await i.editReply(!r.ok ? `⚠️ ${r.error}` : `Posted for ${discordTime(when.start)}. It'll be announced in the events channel and is on the Playbill.${
           r.data.collabError ? `\nThe collab request didn't go out: ${r.data.collabError}` : r.data.collabId ? '\nYour partner has been asked to confirm the collab.' : ''}`);
         return true;
       }
@@ -722,7 +722,7 @@ export function createFbt(d: FbtDeps) {
       }
       if (sub === 'cancel') {
         const r = await sitePost(d.site, '/api/bot/event', { action: 'cancel', actor: i.user.id, eventId: i.options.getString('event', true) });
-        await say(i, r.ok ? 'Event cancelled. It\'s off the Strip and the events channel has been told.' : `⚠️ ${r.error}`);
+        await say(i, r.ok ? 'Event cancelled. It\'s off the Playbill and the events channel has been told.' : `⚠️ ${r.error}`);
         return true;
       }
     }
@@ -853,7 +853,7 @@ export function createFbt(d: FbtDeps) {
         { name: 'Your stage art', value: `Upload a **${PERFORMER_LABEL.pole.toLowerCase()}** (tall 1:2, 512 × 1024), a **${PERFORMER_LABEL.chair.toLowerCase()}** (square) and a **${PERFORMER_LABEL.deck.toLowerCase()}** (square, dark background) on My dashboard. Staff check each one, then it shows in the world whenever you're the one performing.` },
         { name: 'Your VRChat name', value: 'The world recognises you by your VRChat display name. If you change it, we pick up the new one automatically within a day.' },
         { name: 'Nights', value: roles.dj ? 'Claim DJ sets and join dancer rosters on the Playbill, and watch #fbt-events for new nights.' : 'Find nights to dance at on the Playbill, and watch #fbt-events for new ones.' })
-      .setFooter({ text: 'FBT Social · the after-dark Strip' });
+      .setFooter({ text: 'FBT Social · Where VRChat takes the stage' });
   }
 
   /** Congratulations + getting started, for a club approved to Premium or Headliner. */
@@ -863,7 +863,7 @@ export function createFbt(d: FbtDeps) {
       linked: Boolean(g?.vrchatUrl), manageUrl: url(`/manage?group=${groupId}`), hostUrl: url('/host'), pageUrl: url('/'),
     });
     const embed = new EmbedBuilder().setColor(level === 'headliner' ? GOLD : EMERALD).setTitle(w.title).setDescription(w.description)
-      .addFields(w.fields.map(f => ({ name: f.name, value: f.value.slice(0, 1024) }))).setFooter({ text: 'FBT Social · the after-dark Strip' });
+      .addFields(w.fields.map(f => ({ name: f.name, value: f.value.slice(0, 1024) }))).setFooter({ text: 'FBT Social · Where VRChat takes the stage' });
     await dm(userId, { embeds: [embed], components: [linkRow(['My dashboard', url('/me')], ['Customize', url(`/manage?group=${groupId}`)], ['Host a night', url('/host')])] });
   }
 
@@ -918,7 +918,7 @@ export function createFbt(d: FbtDeps) {
           const embed = new EmbedBuilder().setColor(headliner ? GOLD : host?.tier === 'premium' ? EMERALD : BRONZE)
             .setTitle(p.title).setURL(url(`/v/${p.groupSlug}`))
             .setDescription(`${headliner ? '👑 **Headliner** · ' : ''}**${p.groupName}** · ${discordTime(start)} (${discordTime(start, 'R')})${p.description ? `\n\n${p.description}` : ''}`)
-            .setFooter({ text: 'FBT Social · RSVP on the Strip' });
+            .setFooter({ text: 'FBT Social · RSVP on the website' });
           // Events with a lineup get the interactive post (claimable DJ sets, join-the-roster button).
           const post = hasLineup(p) ? await lineupPost(String(p.eventId)) : undefined;
           if (post) {

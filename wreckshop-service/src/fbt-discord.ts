@@ -60,7 +60,7 @@ export async function postAnnouncement(guild: Guild, a: Announcement): Promise<s
   if (!ch || (ch.type !== ChannelType.GuildText && ch.type !== ChannelType.GuildAnnouncement))
     throw Object.assign(new Error('That channel is gone or isn\'t a text channel.'), { permanent: true });
   const embed = new EmbedBuilder().setColor(0xe8507a).setTitle(a.title.slice(0, 256)).setDescription(a.body.slice(0, 4000))
-    .setFooter({ text: 'FBT Social · the after-dark Strip' });
+    .setFooter({ text: 'FBT Social · Where VRChat takes the stage' });
   if (a.image) embed.setImage(a.image);
   const links = a.links.filter((l) => /^https:\/\//.test(l.url)).slice(0, 5);
   const components = links.length ? [new ActionRowBuilder<ButtonBuilder>().addComponents(links.map((l) => new ButtonBuilder().setLabel(l.label.slice(0, 80)).setStyle(ButtonStyle.Link).setURL(l.url)))] : [];
