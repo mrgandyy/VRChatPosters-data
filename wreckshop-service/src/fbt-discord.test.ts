@@ -51,7 +51,7 @@ test('artwork guide posts fit Discord and match numbering 2', async () => {
   assert.equal(posts.length, 4);
   assert.ok(posts.every((p) => p.length <= 2000), posts.map((p) => p.length).join(','));
   assert.match(posts[0]!, /posters \*\*1–11\*\*/); assert.match(posts[0]!, /1024 × 1536/); assert.match(posts[0]!, /<#111>/);
-  assert.match(posts[1]!, /`01` Sidewalk totem 1, front/); assert.match(posts[1]!, /`32` /);
+  assert.match(posts[1]!, /`01` Sidewalk, left totem, street side/); assert.match(posts[1]!, /Main dance floor\*\* · 12–16, 22, 27/); assert.match(posts[1]!, /fbtsocial\.com\/help#posters/); assert.match(posts[1]!, /`32` /);
   assert.match(posts[2]!, /age-verified \(18\+\)/); assert.match(posts[2]!, /fbtheat/);
   assert.match(posts[3]!, /<#222>/);
   assert.ok(!posts.join('').includes('1-8') && !posts.join('').includes('01–08'), 'no old numbering');

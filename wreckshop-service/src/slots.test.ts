@@ -8,17 +8,32 @@ import sharp from 'sharp';
 import { Store } from './db.js';
 import { buildAtlas } from './atlas.js';
 import { catalog } from './publish.js';
-import { SLOTS, STANDARD_SLOTS, cellOf, posterMap, slotOfCell } from './slots.js';
+import { SLOTS, STANDARD_SLOTS, cellOf, posterMap, slotList, slotOfCell, zoneSlots } from './slots.js';
 import { maxSlots } from './types.js';
 
-test('numbering 2: 32 posters, every atlas cell exactly once, walking order by zone', () => {
+test('numbering 2: 32 posters, every atlas cell exactly once, zones as checked in the world', () => {
   assert.equal(SLOTS.length, 32);
   assert.deepEqual(SLOTS.map(s => s.slot), Array.from({ length: 32 }, (_, i) => i + 1));
   assert.deepEqual([...SLOTS.map(s => s.cell)].sort((a, b) => a - b), Array.from({ length: 32 }, (_, i) => i + 1));
-  const zones = SLOTS.map(s => s.zone);
-  const order = ['entrance', 'arrival', 'lower', 'upper'];
-  for (let i = 1; i < zones.length; i++) assert.ok(order.indexOf(zones[i]!) >= order.indexOf(zones[i - 1]!), `zone order at ${i + 1}`);
   for (const s of SLOTS) { assert.equal(cellOf(s.slot), s.cell); assert.equal(slotOfCell(s.cell), s.slot); }
+  // Verified 15 Oct 2026: 22 and 27 hang on the main-floor walls; 15 is the left wall, not the stage wall.
+  assert.equal(slotList(zoneSlots('entrance')), '1–6');
+  assert.equal(slotList(zoneSlots('arrival')), '7–11');
+  assert.equal(slotList(zoneSlots('lower')), '12–16, 22, 27');
+  assert.equal(slotList(zoneSlots('upper')), '17–21, 23–26, 28–32');
+  assert.match(SLOTS[14]!.where, /^Main floor, left wall, middle/);
+  assert.match(SLOTS[21]!.where, /^Main floor, left wall, near the stage/);
+  assert.match(SLOTS[26]!.where, /^Main floor, right wall, at the back/);
+  assert.ok(SLOTS.every(s => !/east|west/i.test(s.where)), 'left/right, never compass words');
+});
+
+test('the poster map message lists zones by number and links the photo guide', () => {
+  const m = posterMap('https://fbtsocial.com/');
+  assert.match(m, /Main dance floor__ · 12–16, 22, 27 · Premium & Headliner/);
+  assert.match(m, /Entrance & sidewalk__ · 1–6 · every club/);
+  assert.match(m, /https:\/\/fbtsocial\.com\/help#posters/);
+  assert.ok(m.length < 2000, 'fits one Discord message');
+  assert.equal(slotList([3, 1, 2, 7, 9, 10]), '1–3, 7, 9–10');
 });
 
 test('standard = exactly the entrance + arrival hall (11); premium = all 32', () => {

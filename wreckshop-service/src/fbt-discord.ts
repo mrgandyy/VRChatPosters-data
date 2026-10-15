@@ -3,7 +3,7 @@
 // Nothing here acts on its own: every change comes from a staff click on the site.
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, SnowflakeUtil, type Guild, type GuildBasedChannel, type TextChannel } from 'discord.js';
 import type { Store } from './db.js';
-import { SLOTS, ZONE_LABEL } from './slots.js';
+import { SLOTS, ZONE_LABEL, ZONE_ORDER, slotList, zoneSlots } from './slots.js';
 
 /** Settings that point at channels the bots depend on. These are never deleted from the site. */
 export const PROTECTED_SETTINGS = ['fbt_start_channel', 'fbt_events_channel', 'approval_channel', 'log_channel', 'submission_channel', 'help_channel'];
@@ -77,8 +77,8 @@ export function guidePosts(siteUrl: string, submitId: string | null, helpId: str
   const site = siteUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
   const submit = submitId ? `<#${submitId}>` : '#wreckshop-submit';
   const help = helpId ? `<#${helpId}>` : '#wreckshop-help';
-  const zones = (['entrance', 'arrival', 'lower', 'upper'] as const).map((z) => [
-    `**${ZONE_LABEL[z]}**${z === 'lower' || z === 'upper' ? ' (Premium)' : ''}`,
+  const zones = ZONE_ORDER.map((z) => [
+    `**${ZONE_LABEL[z]}** · ${slotList(zoneSlots(z))}`,
     ...SLOTS.filter((x) => x.zone === z).map((x) => `\`${String(x.slot).padStart(2, '0')}\` ${x.where}`),
   ].join('\n'));
   return [
@@ -108,11 +108,11 @@ export function guidePosts(siteUrl: string, submitId: string | null, helpId: str
     ].join('\n'),
     [
       '# POSTER SLOT MAP: ALL 32 SPOTS',
-      '**Updated October 11, 2026.** Numbered in the order guests walk in. On the sidewalk totems, front and back are different spots.',
-      '**1–11:** every club. **12–32:** Premium & Headliner.',
+      '**Checked spot by spot in the world, Oct 15, 2026.** Numbered in walking order. Left/right: as you walk in, facing the stage.',
+      '**1–11:** every club. **12–32:** Premium & Headliner. 22 and 27 hang on the main-floor walls.',
       '',
       ...zones.flatMap((z) => [z, '']),
-      `\`/poster map\` shows this any time, and the map on **My dashboard → Customize** shows which spots have your art.`,
+      `Photos of every spot: **${site}/help#posters** · \`/poster map\` any time.`,
     ].join('\n'),
     [
       '# PREMIUM & HEADLINER',
