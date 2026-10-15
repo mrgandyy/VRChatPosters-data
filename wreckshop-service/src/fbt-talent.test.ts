@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ActionRowBuilder, ButtonBuilder } from 'discord.js';
-import { clean, groupUrl, introHost, introPerformer, inviteDm, leftHost, pausedDm, reminderHost, reminderPerformer, talentCallMessage, type Joined } from './fbt-talent.js';
+import { clean, groupUrl, isProducerRoleName, producerDm, introHost, introPerformer, inviteDm, leftHost, pausedDm, reminderHost, reminderPerformer, talentCallMessage, type Joined } from './fbt-talent.js';
 
 const url = (p: string) => `https://fbt.test${p}`;
 const EVENT = '11111111-2222-3333-4444-555555555555';
@@ -79,4 +79,18 @@ test('the pause DM is neutral and says when it ends', () => {
   assert.match(m.content!, /missed 3 nights/);
   assert.match(m.content!, /paused until <t:/);
   assert.ok(!/report|ban|punish/i.test(m.content!));
+});
+
+test('the Producer role is found by name, with or without a symbol in front', () => {
+  for (const n of ['Producer', 'producers', '✦ Producer', 'FBT Producer', 'FBT Social Producers', ' Producer ']) assert.ok(isProducerRoleName(n), n);
+  for (const n of ['Executive Producer', 'Producer Applicants', 'Product', 'Premium Group']) assert.ok(!isProducerRoleName(n), n);
+});
+
+test('the supporter thank-you names the role and links the Dev Fund', () => {
+  const m = producerDm(url);
+  const e = m.embeds![0]!.toJSON();
+  assert.match(e.title!, /Thank you for backing FBT Social/);
+  assert.match(e.description!, /\*\*Producer\*\*/);
+  assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(e.title! + e.description!), 'no emoji, Unicode symbols only');
+  assert.equal((m.components![0]!.toJSON() as { components: { url?: string }[] }).components[0]!.url, 'https://fbt.test/shop');
 });

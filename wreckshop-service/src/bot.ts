@@ -525,7 +525,7 @@ const art = createArt({ store, dataDir, client, guildId, auditLog });
 const fbtSite = { url: process.env.FBT_SITE_URL, secret: process.env.FBT_BOT_SECRET };
 const fbt = createFbt({
   client, store, guildId, art,
-  site: fbtSite, dancerRoleId: process.env.FBT_DANCER_ROLE_ID, djRoleId: process.env.FBT_DJ_ROLE_ID,
+  site: fbtSite, dancerRoleId: process.env.FBT_DANCER_ROLE_ID, djRoleId: process.env.FBT_DJ_ROLE_ID, producerRoleId: process.env.FBT_PRODUCER_ROLE_ID,
   publicUrl: process.env.FBT_PUBLIC_URL ?? process.env.FBT_SITE_URL ?? 'https://dsc.gg/wreckshop',
   welcome, isAdmin: admin, auditLog,
 });
