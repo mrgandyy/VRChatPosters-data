@@ -2,7 +2,7 @@
 // applications with staff review, events and collabs. The website (fbt-social-web on Railway)
 // holds events, collabs and applications; this bot is the Discord front door to all of it.
 import {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, LabelBuilder, ModalBuilder, PermissionFlagsBits,
+  ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, LabelBuilder, ModalBuilder, PermissionFlagsBits,
   SlashCommandBuilder, TextInputBuilder, TextInputStyle, GuildScheduledEventEntityType, GuildScheduledEventPrivacyLevel,
   type AutocompleteInteraction, type ButtonInteraction, type ChatInputCommandInteraction, type Client, type Guild,
   type GuildMember, type ModalSubmitInteraction, type TextChannel, type User,
@@ -21,6 +21,7 @@ import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement }
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
 import { PERFORMER_LABEL, isPerformerKind, performerByDiscord, removePerformer, removePerformerArt, renamePerformer, upsertPerformer } from './performers.js';
 import { setStudioTheme } from './studio.js';
+import { auditSummary, auditText, lockDiff, lockedDm, lockedGroups, parseLocked, verifyAudit } from './verify-gate.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
 const RULES_VERSION = 'vrchat-rules-v1';
@@ -43,6 +44,8 @@ export interface FbtDeps {
   djRoleId?: string;
   /** Discord role for Dev Fund supporters (FBT_PRODUCER_ROLE_ID); else setting fbt_producer_role, else a role named "Producer". */
   producerRoleId?: string;
+  /** FBT_CODE_GATE=on: clubs with no rep holding the Verified role can't use their door code (verify-gate.ts). */
+  codeGate?: boolean;
 }
 
 type Reply = ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction;
@@ -230,6 +233,7 @@ export function createFbt(d: FbtDeps) {
         ? { members: [...guild.members.cache.keys()], verified: [...verified] } : undefined;
       const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined), memberNames(), verified, people);
       await syncTierRoles().catch((e) => console.error('Tier role sync failed:', e));
+      await codeGate(guild, verified).catch((e) => console.error('Code gate check failed:', e));
       if (!r.ok) console.error('Website group sync failed:', r.error);
     }, delayMs);
   }
@@ -242,6 +246,50 @@ export function createFbt(d: FbtDeps) {
     const data = r.ok ? r.data : { mine: [], partners: [] };
     whoisCache.set(userId, { at: Date.now(), data });
     return data;
+  }
+
+
+  // ── The Verified-role code gate (verify-gate.ts) ──────────────────────────────────────────
+  /** The member list is trustworthy only right after a full fetch: never lock anyone from a partial cache. */
+  const fullScan = () => Boolean(d.welcome && scan && Date.now() - scan.at < 15 * 60_000);
+  function auditNow(guild: Guild) {
+    return verifyAudit(store.groups(), id => store.representatives(id), currentVerified(), new Set(guild.members.cache.keys()), memberNames());
+  }
+  async function codeGate(guild: Guild | undefined, verified: Set<string>): Promise<void> {
+    const saved = store.setting('verify_locked');
+    if (!d.codeGate) {
+      // Gate off: unlock everything that was locked, and forget the list so turning it on again is a fresh first sweep.
+      if (saved) {
+        const was = parseLocked(saved).size;
+        store.setSetting('verify_locked', '');
+        store.setSetting('catalog-dirty', '1');
+        if (was) await d.auditLog(guild ?? null, `✦ Code gate off: ${was} club${was === 1 ? '' : 's'} can use their door code again.`);
+      }
+      return;
+    }
+    if (!guild || !verifiedRoleId(guild) || !fullScan() || !verified) return;
+    const next = lockedGroups(auditNow(guild));
+    const first = !saved;
+    const diff = lockDiff(parseLocked(saved), next);
+    if (!first && !diff.locked.length && !diff.unlocked.length) return;
+    store.setSetting('verify_locked', JSON.stringify(next));
+    store.setSetting('catalog-dirty', '1');
+    const nameOf = (id: number) => `${store.group(id)?.name ?? 'Club'} (#${id})`;
+    if (first) {
+      // The first sweep after switching the gate on: no DMs (the owner reaches out personally).
+      await d.auditLog(guild, `✦ Code gate on: ${next.length} club${next.length === 1 ? '' : 's'} with no verified rep can't use their door code until a rep gets the Verified role.${next.length ? ` ${next.slice(0, 25).map(nameOf).join(', ')}${next.length > 25 ? '…' : ''}` : ''}`);
+      return;
+    }
+    const ch = verifyChannel(guild);
+    for (const id of diff.locked) {
+      await d.auditLog(guild, `✦ ${nameOf(id)}: no rep has the Verified role now, so its door code is paused.`);
+      for (const rep of store.representatives(id)) await dm(rep, lockedDm(store.group(id)?.name ?? 'your club', ch ? `<#${ch.id}>` : 'the verify channel'));
+    }
+    for (const id of diff.unlocked) await d.auditLog(guild, `✦ ${nameOf(id)}: a rep is verified (or the club is paused), so the door code works again.`);
+  }
+  /** Does this Discord user hold the Verified role? For the slash commands in bot.ts. */
+  async function isMemberVerified(userId: string): Promise<boolean> {
+    return Boolean(await memberVerified(userId));
   }
 
   // ── Channels ─────────────────────────────────────────────────────────────────────────────
@@ -586,6 +634,8 @@ export function createFbt(d: FbtDeps) {
     o.setName('timezone').setDescription('Your time zone (remembered after the first time)').addChoices(...TIMEZONES);
   const commands = [
     new SlashCommandBuilder().setName('start').setDescription('New here? Register, get verified, host and collab'),
+    new SlashCommandBuilder().setName('verify-audit').setDescription('Staff: clubs whose reps don\'t have the Verified role (only you see it)')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
     new SlashCommandBuilder().setName('apply').setDescription('Apply for Premium or Headliner')
       .addStringOption(o => o.setName('level').setDescription('What you are applying for').setRequired(true)
         .addChoices({ name: 'Premium', value: 'premium' }, { name: 'Headliner', value: 'headliner' })),
@@ -622,6 +672,18 @@ export function createFbt(d: FbtDeps) {
   }
 
   async function handleCommand(i: ChatInputCommandInteraction): Promise<boolean> {
+    if (i.commandName === 'verify-audit') {
+      if (!d.isAdmin(i)) { await say(i, 'Only Wreckshop admins can run the audit.'); return true; }
+      await i.deferReply({ flags: EPHEMERAL });
+      const guild = d.client.guilds.cache.get(d.guildId);
+      if (!guild) { await i.editReply('The bot isn\'t in the FBT Social server.'); return true; }
+      if (!verifiedRoleId(guild)) { await i.editReply('No Verified role found. Make sure the 18+ verify bot\'s role is named "Verified" (or set fbt_verified_role).'); return true; }
+      scan = undefined; await memberScan();
+      if (!fullScan()) { await i.editReply('I couldn\'t load the full member list (the Server Members intent is off), so the audit would be wrong. Turn welcomes on and try again.'); return true; }
+      const a = auditNow(guild);
+      await i.editReply({ content: auditSummary(a, Boolean(d.codeGate)), files: [new AttachmentBuilder(Buffer.from(auditText(a)), { name: 'verified-audit.txt' })] });
+      return true;
+    }
     if (i.commandName === 'start') {
       const g = groupOf(i.user.id);
       await i.reply({ embeds: [startEmbed()], components: startRows(), flags: EPHEMERAL });
@@ -1193,5 +1255,5 @@ export function createFbt(d: FbtDeps) {
     setInterval(() => void sitePost(d.site, '/api/cron/rollup', {}, 60_000), 10 * 60_000);
   }
 
-  return { commands, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver, artDecided, scheduleChannels };
+  return { commands, isMemberVerified, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver, artDecided, scheduleChannels };
 }
