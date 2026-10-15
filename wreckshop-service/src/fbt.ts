@@ -13,11 +13,13 @@ import { groupVerified, siteBytes, sitePost, siteEnabled, statusLabel, syncGroup
 import { applyAdmin, setLevel, type AdminAction } from './fbt-admin.js';
 import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
+import { hasLineup, lineupMessage, type LineupView } from './fbt-lineup.js';
+import { inviteDeclinedDm, inviteDm, introHost, introPerformer, leftHost, pausedDm, reminderHost, reminderPerformer, talentCallMessage, type Call, type Invite, type Joined, type Reminder } from './fbt-talent.js';
 import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
 import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
-import { PERFORMER_LABEL, isPerformerKind, removePerformer, removePerformerArt, renamePerformer, upsertPerformer } from './performers.js';
+import { PERFORMER_LABEL, isPerformerKind, performerByDiscord, removePerformer, removePerformerArt, renamePerformer, upsertPerformer } from './performers.js';
 import { setStudioTheme } from './studio.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
@@ -37,6 +39,8 @@ export interface FbtDeps {
   art?: Art;
   /** Discord role for verified performers (FBT_DANCER_ROLE_ID); else setting fbt_dancer_role, else a role named "Dancer(s)". */
   dancerRoleId?: string;
+  /** Discord role for verified DJs (FBT_DJ_ROLE_ID); else setting fbt_dj_role, else a role named "DJ(s)". */
+  djRoleId?: string;
 }
 
 type Reply = ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction;
@@ -45,6 +49,25 @@ type Whois = { mine: { id: number; name: string; status: string }[]; partners: {
 export function createFbt(d: FbtDeps) {
   const { store } = d;
   const url = (path: string) => `${d.publicUrl.replace(/\/$/, '')}${path}`;
+
+  /** Draw (or redraw) an event's interactive lineup post from the website's current lineup. */
+  async function lineupPost(eventId: string): Promise<{ view: LineupView; message: ReturnType<typeof lineupMessage> } | undefined> {
+    const r = await sitePost<LineupView>(d.site, '/api/bot/lineup', { action: 'view', event: eventId });
+    if (!r.ok) return undefined;
+    return { view: r.data, message: lineupMessage(r.data, url(`/e/${eventId}`)) };
+  }
+  /** Edit the stored lineup message for an event, if the bot posted one. */
+  async function refreshLineup(eventId: string): Promise<void> {
+    const where = store.setting(`lineup-msg:${eventId}`);
+    if (!where) return;
+    const [channelId, messageId] = where.split(':');
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const ch = guild?.channels.cache.get(channelId!);
+    if (ch?.type !== ChannelType.GuildText) return;
+    const msg = await ch.messages.fetch(messageId!).catch(() => undefined);
+    const post = await lineupPost(eventId);
+    if (msg && post) await msg.edit(post.message).catch((e: Error) => console.error('Lineup refresh failed:', e.message));
+  }
   const groupOf = (userId: string): Group | undefined => store.representedGroups(userId)[0];
   const tzOf = (userId: string) => store.setting(`fbt-tz-${userId}`);
 
@@ -396,6 +419,33 @@ export function createFbt(d: FbtDeps) {
       case 'posters':
         await say(i, 'Every registered group gets posters 1–11, at the entrance and in the arrival hall; Premium gets all 32 (the whole club), plus an entrance billboard, a photo-wall backdrop and a DJ booth front. Use `/poster submit` (one image) or `/poster batch` (up to eight); `/poster map` shows where each number is. Posters: portrait 2:3, ideally 1024 × 1536. Billboard: 2048 × 512. Backdrop: 2048 × 1536. DJ booth front: 2400 × 400 (upload it on the website, template included). Verified performers upload their pole, chair and deck art on the website too. Staff review everything before it goes live. `/ws-help` has the details.');
         return true;
+      case 'luc': case 'lur': case 'luj': case 'lul': {
+        // One-tap lineup buttons: the website checks the performer is verified and applies the rules.
+        await i.deferReply({ flags: EPHEMERAL });
+        const body = action === 'luc' ? { action: 'claim', actor: i.user.id, slot: arg }
+          : action === 'lur' ? { action: 'releaseMine', actor: i.user.id, event: arg }
+          : action === 'luj' ? { action: 'join', actor: i.user.id, event: arg }
+          : { action: 'leave', actor: i.user.id, event: arg };
+        const r = await sitePost<{ message?: string }>(d.site, '/api/bot/lineup', body);
+        await i.editReply(r.ok ? `✅ ${r.data.message ?? 'Done.'}` : `⚠️ ${r.error}`);
+        if (r.ok) {
+          // Redraw this post right away (the outbox refresh catches any other post for the event).
+          const id = action === 'luc' ? i.message.embeds[0]?.url?.split('/e/')[1] : arg;
+          if (id) {
+            const post = await lineupPost(id);
+            if (post) await i.message.edit(post.message).catch(() => undefined);
+          }
+        }
+        return true;
+      }
+      case 'tia': case 'tid': {
+        // An invite DM: "I'm in" claims the spot through the website (same rules as everywhere else).
+        await i.deferReply({ flags: EPHEMERAL });
+        const r = await sitePost<{ message?: string }>(d.site, '/api/bot/talent', { action: action === 'tia' ? 'accept' : 'decline', actor: i.user.id, invite: arg });
+        await i.editReply(r.ok ? `✅ ${r.data.message ?? 'Done.'}` : `⚠️ ${r.error}`);
+        if (r.ok) await i.message.edit({ components: i.message.components.length ? [linkRow(['Event page', i.message.embeds[0]?.url ?? url('/playbill')])] : [] }).catch(() => undefined);
+        return true;
+      }
       case 'cy': case 'cn': {
         await i.deferUpdate();
         const r = await sitePost<{ status: string; title: string }>(d.site, '/api/bot/collab', { action: action === 'cy' ? 'accept' : 'decline', actor: i.user.id, collabId: arg });
@@ -648,31 +698,48 @@ export function createFbt(d: FbtDeps) {
       : `Your ${what} for **${g.name}** wasn't approved.${note ? `\nStaff note: ${note}` : ''}\nYou can upload a new one any time: ${url('/manage')}`);
   }
 
-  /** The dancer role: FBT_DANCER_ROLE_ID, else setting fbt_dancer_role, else a role named "Dancer"/"Dancers"/"FBT Dancer". */
-  function dancerRole(guild: Guild): string | undefined {
-    for (const id of [d.dancerRoleId, store.setting('fbt_dancer_role')]) if (id && guild.roles.cache.has(id)) return id;
-    return guild.roles.cache.find(r => /^(fbt\s*(social\s*)?)?dancers?$/i.test(r.name.trim()))?.id;
+  /**
+   * A performer role: the env id (FBT_DANCER_ROLE_ID / FBT_DJ_ROLE_ID), else the setting
+   * (fbt_dancer_role / fbt_dj_role), else a role named "Dancer"/"Dancers"/"FBT Dancer" or "DJ"/"DJs"/"FBT DJ".
+   */
+  type PerfRole = 'dancer' | 'dj';
+  const ROLE_NAME: Record<PerfRole, RegExp> = { dancer: /^(fbt\s*(social\s*)?)?dancers?$/i, dj: /^(fbt\s*(social\s*)?)?djs?$/i };
+  function performerRole(guild: Guild, kind: PerfRole): string | undefined {
+    const ids = kind === 'dancer' ? [d.dancerRoleId, store.setting('fbt_dancer_role')] : [d.djRoleId, store.setting('fbt_dj_role')];
+    for (const id of ids) if (id && guild.roles.cache.has(id)) return id;
+    return guild.roles.cache.find(r => ROLE_NAME[kind].test(r.name.trim()))?.id;
   }
-  /** Gives or takes the dancer role. Returns false when there is no role or the bot can't manage it. */
-  async function setDancerRole(userId: string, on: boolean): Promise<boolean> {
+  /** Give or take the Dancer and DJ roles to match what the performer does. Returns the roles it couldn't find. */
+  async function setPerformerRoles(userId: string, want: Record<PerfRole, boolean>): Promise<PerfRole[]> {
     const guild = d.client.guilds.cache.get(d.guildId);
-    const role = guild && dancerRole(guild);
-    if (!guild || !role) return false;
+    if (!guild) return ['dancer', 'dj'].filter(k => want[k as PerfRole]) as PerfRole[];
     const member = await guild.members.fetch(userId).catch(() => undefined);
-    if (!member) return false;
-    try {
-      if (on && !member.roles.cache.has(role)) await member.roles.add(role, 'FBT Social: verified performer');
-      if (!on && member.roles.cache.has(role)) await member.roles.remove(role, 'FBT Social: off the performer roster');
-      return true;
-    } catch (e) { console.error(`Couldn't ${on ? 'give' : 'take'} the dancer role for ${userId}:`, e instanceof Error ? e.message : e); return false; }
+    const missing: PerfRole[] = [];
+    for (const kind of ['dancer', 'dj'] as PerfRole[]) {
+      const role = performerRole(guild, kind);
+      if (!role) { if (want[kind]) missing.push(kind); continue; }
+      if (!member) continue;
+      try {
+        if (want[kind] && !member.roles.cache.has(role)) await member.roles.add(role, `FBT Social: verified ${kind === 'dj' ? 'DJ' : 'dancer'}`);
+        if (!want[kind] && member.roles.cache.has(role)) await member.roles.remove(role, `FBT Social: no longer a ${kind === 'dj' ? 'DJ' : 'dancer'} on the roster`);
+      } catch (e) { console.error(`Couldn't update the ${kind} role for ${userId}:`, e instanceof Error ? e.message : e); missing.push(kind); }
+    }
+    return missing;
   }
-  function performerWelcome(name: string) {
+  /** What the website says this performer does. Older items carry no roles: they were dancers. */
+  const rolesOf = (raw: unknown): Record<PerfRole, boolean> => {
+    const list = Array.isArray(raw) ? raw.map(String) : ['dancer'];
+    return { dancer: list.includes('dancer'), dj: list.includes('dj') };
+  };
+  const roleWords = (r: Record<PerfRole, boolean>) => [r.dancer && 'dancer', r.dj && 'DJ'].filter(Boolean).join(' and ') || 'performer';
+
+  function performerWelcome(name: string, roles: Record<PerfRole, boolean>) {
     return new EmbedBuilder().setColor(ROSE).setTitle('Welcome to the FBT Social stage')
-      .setDescription(`You're a verified FBT Social performer as **${name.replace(/[`*_~|<>@\\]/g, '')}**. The dancer role is yours in our Discord.`)
+      .setDescription(`You're a verified FBT Social ${roleWords(roles)} as **${name.replace(/[`*_~|<>@\\]/g, '')}**. The ${roleWords(roles)} role${roles.dancer && roles.dj ? 's are' : ' is'} yours in our Discord. You can change what you perform as any time on My dashboard.`)
       .addFields(
         { name: 'Your stage art', value: `Upload a **${PERFORMER_LABEL.pole.toLowerCase()}** (tall 1:2, 512 × 1024), a **${PERFORMER_LABEL.chair.toLowerCase()}** (square) and a **${PERFORMER_LABEL.deck.toLowerCase()}** (square, dark background) on My dashboard. Staff check each one, then it shows in the world whenever you're the one performing.` },
         { name: 'Your VRChat name', value: 'The world recognises you by your VRChat display name. If you change it, we pick up the new one automatically within a day.' },
-        { name: 'Nights', value: 'Find nights to dance at on the Strip, and watch #fbt-events for new ones.' })
+        { name: 'Nights', value: roles.dj ? 'Claim DJ sets and join dancer rosters on the Playbill, and watch #fbt-events for new nights.' : 'Find nights to dance at on the Playbill, and watch #fbt-events for new ones.' })
       .setFooter({ text: 'FBT Social · the after-dark Strip' });
   }
 
@@ -739,7 +806,14 @@ export function createFbt(d: FbtDeps) {
             .setTitle(p.title).setURL(url(`/v/${p.groupSlug}`))
             .setDescription(`${headliner ? '👑 **Headliner** · ' : ''}**${p.groupName}** · ${discordTime(start)} (${discordTime(start, 'R')})${p.description ? `\n\n${p.description}` : ''}`)
             .setFooter({ text: 'FBT Social · RSVP on the Strip' });
-          await events.send({ embeds: [embed], components: [linkRow(['RSVP on the Strip', url(`/v/${p.groupSlug}`)])] });
+          // Events with a lineup get the interactive post (claimable DJ sets, join-the-roster button).
+          const post = hasLineup(p) ? await lineupPost(String(p.eventId)) : undefined;
+          if (post) {
+            const sent = await events.send(post.message);
+            store.setSetting(`lineup-msg:${p.eventId}`, `${sent.channelId}:${sent.id}`);
+          } else {
+            await events.send({ embeds: [embed.setURL(url(`/e/${p.eventId}`))], components: [linkRow(['Event page & RSVP', url(`/e/${p.eventId}`)], ['Club page', url(`/v/${p.groupSlug}`)])] });
+          }
         }
         if (guild?.members.me?.permissions.has(PermissionFlagsBits.ManageEvents) && start > Date.now() + 60_000) {
           const ev = await guild.scheduledEvents.create({
@@ -749,6 +823,52 @@ export function createFbt(d: FbtDeps) {
           }).catch(e => { console.error('Scheduled event failed:', e.message); return undefined; });
           if (ev) await sitePost(d.site, '/api/bot/event', { action: 'linked', eventId: p.eventId, discordEventId: ev.id });
         }
+        return;
+      }
+      case 'event.lineup': {
+        await refreshLineup(String(p.eventId));
+        return;
+      }
+      case 'lineup.joined': {
+        // The intro: the host hears who signed up (whoever posted the night first, then the club's
+        // reps if they can't be reached), and the performer gets the night, the host and next steps.
+        const j = p as Joined;
+        const hosts = (j.hosts ?? []).filter((h) => h !== j.performer.id);
+        for (const h of hosts) if (await dm(h, introHost(j, url))) break;
+        await dm(j.performer.id, introPerformer(j, url));
+        return;
+      }
+      case 'lineup.left': {
+        const j = p as Joined;
+        for (const h of (j.hosts ?? []).filter((x) => x !== j.performer.id)) if (await dm(h, leftHost(j, url))) break;
+        return;
+      }
+      case 'lineup.reminder': {
+        const r = p as Reminder;
+        for (const perf of r.performers ?? []) await dm(perf.id, reminderPerformer(r, perf, url));
+        for (const h of r.hosts ?? []) if (await dm(h, reminderHost(r, url))) break;
+        return;
+      }
+      case 'talent.invite': {
+        const v = p as Invite;
+        const sent = await dm(v.performer.id, inviteDm(v, url));
+        if (!sent) await dm(v.by, { content: `We couldn't DM **${String(v.performer.name).replace(/[`*_~|<>@\\]/g, '')}** (their DMs are closed). Send them the event page yourself: ${url(`/e/${v.eventId}`)}`, allowedMentions: { parse: [] } });
+        return;
+      }
+      case 'talent.invite.answer': {
+        if (!p.accepted) await dm(String(p.to), inviteDeclinedDm({ performer: String(p.performer), title: String(p.title), eventId: String(p.eventId) }, url));
+        return;
+      }
+      case 'talent.call': {
+        // Open spots go to the talent channel (made on first use), pinging the Dancer and/or DJ role.
+        if (!guild) throw new Error('Not in the server.');
+        const ch = channel('fbt_talent_channel') ?? await ensureChannel(guild, 'fbt_talent_channel', 'talent-calls', true);
+        const c = p as Call;
+        await ch.send(talentCallMessage(c, { dancer: performerRole(guild, 'dancer'), dj: performerRole(guild, 'dj') }, url));
+        return;
+      }
+      case 'talent.paused': {
+        await dm(String(p.user), pausedDm({ days: Number(p.days), until: String(p.until), count: Number(p.count), windowDays: Number(p.windowDays) }, url));
         return;
       }
       case 'event.cancelled': {
@@ -863,12 +983,23 @@ export function createFbt(d: FbtDeps) {
       case 'locker.rename': case 'locker.remove':
         return; // dancer lockers were retired before launch; anything still queued is dropped
       case 'performer.verified': {
-        // The website checked the VRChat profile (18+ and the bio code). Roster, dancer role, welcome DM.
+        // The website verified the VRChat account (18+, and a friend request from it to the tracker
+        // account, or staff by hand). Roster, Dancer/DJ roles, welcome DM.
         const user = String(p.user);
+        const roles = rolesOf(p.roles);
         const perf = upsertPerformer(store, user, String(p.vrcId), String(p.name));
-        const role = await setDancerRole(user, true);
-        await d.auditLog(guild, `💃 <@${user}> is a verified performer (VRChat: ${perf.name.replace(/[`*_~|<>@\\]/g, '')}).${role ? '' : ' No dancer role was given: set FBT_DANCER_ROLE_ID or make a "Dancer" role below the bot.'}`);
-        await dm(user, { embeds: [performerWelcome(perf.name)], components: [linkRow(['My dashboard', url('/me')], ['Upcoming nights', url('/')])] });
+        const missing = await setPerformerRoles(user, roles);
+        await d.auditLog(guild, `💃 <@${user}> is a verified ${roleWords(roles)} (VRChat: ${perf.name.replace(/[`*_~|<>@\\]/g, '')}).${missing.length ? ` No ${missing.map(k => k === 'dj' ? 'DJ' : 'Dancer').join(' or ')} role was given: make a role named ${missing.map(k => k === 'dj' ? '"DJ"' : '"Dancer"').join(' and ')} below the bot.` : ''}`);
+        await dm(user, { embeds: [performerWelcome(perf.name, roles)], components: [linkRow(['My dashboard', url('/me')], ['Upcoming nights', url('/playbill')])] });
+        return;
+      }
+      case 'performer.roles': {
+        // A verified performer changed what they perform as on My dashboard: match the Discord roles.
+        const user = String(p.user);
+        if (!performerByDiscord(store, user)) return;
+        const roles = rolesOf(p.roles);
+        const missing = await setPerformerRoles(user, roles);
+        if (missing.length) await d.auditLog(guild, `<@${user}> is now a ${roleWords(roles)}, but there's no ${missing.map(k => k === 'dj' ? '"DJ"' : '"Dancer"').join(' or ')} role below the bot to give.`);
         return;
       }
       case 'performer.renamed': {
@@ -879,7 +1010,7 @@ export function createFbt(d: FbtDeps) {
       case 'performer.removed': {
         const perf = removePerformer(store, String(p.vrcId));
         if (!perf) return;
-        await setDancerRole(perf.discordId, false);
+        await setPerformerRoles(perf.discordId, { dancer: false, dj: false });
         await d.auditLog(guild, `Performer <@${perf.discordId}> taken off the roster${p.by && p.by !== perf.discordId ? ` by <@${p.by}>` : ''} on the website. Their slot is free again.`);
         return;
       }
