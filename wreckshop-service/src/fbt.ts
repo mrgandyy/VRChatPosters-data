@@ -14,7 +14,7 @@ import { applyAdmin, setLevel, type AdminAction } from './fbt-admin.js';
 import { findTierRoles, levelFor, planRoles } from './fbt-roles.js';
 import { discordTime, parseWhen, TIMEZONES } from './fbt-time.js';
 import { hasLineup, lineupMessage, type LineupView } from './fbt-lineup.js';
-import { inviteDeclinedDm, inviteDm, introHost, introPerformer, leftHost, pausedDm, reminderHost, reminderPerformer, talentCallMessage, type Call, type Invite, type Joined, type Reminder } from './fbt-talent.js';
+import { inviteDeclinedDm, inviteDm, isProducerRoleName, producerDm, introHost, introPerformer, leftHost, pausedDm, reminderHost, reminderPerformer, talentCallMessage, type Call, type Invite, type Joined, type Reminder } from './fbt-talent.js';
 import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
 import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
@@ -41,6 +41,8 @@ export interface FbtDeps {
   dancerRoleId?: string;
   /** Discord role for verified DJs (FBT_DJ_ROLE_ID); else setting fbt_dj_role, else a role named "DJ(s)". */
   djRoleId?: string;
+  /** Discord role for Dev Fund supporters (FBT_PRODUCER_ROLE_ID); else setting fbt_producer_role, else a role named "Producer". */
+  producerRoleId?: string;
 }
 
 type Reply = ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction;
@@ -726,6 +728,11 @@ export function createFbt(d: FbtDeps) {
     }
     return missing;
   }
+  /** The Dev Fund supporter role: env id, else the setting, else a role named "Producer". */
+  function producerRole(guild: Guild): string | undefined {
+    for (const id of [d.producerRoleId, store.setting('fbt_producer_role')]) if (id && guild.roles.cache.has(id)) return id;
+    return guild.roles.cache.find(r => isProducerRoleName(r.name))?.id;
+  }
   /** What the website says this performer does. Older items carry no roles: they were dancers. */
   const rolesOf = (raw: unknown): Record<PerfRole, boolean> => {
     const list = Array.isArray(raw) ? raw.map(String) : ['dancer'];
@@ -991,6 +998,25 @@ export function createFbt(d: FbtDeps) {
         const missing = await setPerformerRoles(user, roles);
         await d.auditLog(guild, `💃 <@${user}> is a verified ${roleWords(roles)} (VRChat: ${perf.name.replace(/[`*_~|<>@\\]/g, '')}).${missing.length ? ` No ${missing.map(k => k === 'dj' ? 'DJ' : 'Dancer').join(' or ')} role was given: make a role named ${missing.map(k => k === 'dj' ? '"DJ"' : '"Dancer"').join(' and ')} below the bot.` : ''}`);
         await dm(user, { embeds: [performerWelcome(perf.name, roles)], components: [linkRow(['My dashboard', url('/me')], ['Upcoming nights', url('/playbill')])] });
+        return;
+      }
+      case 'donor.thanked': {
+        // A signed-in supporter's Dev Fund gift was paid (or staff pressed Producer role): give the role, say thanks once.
+        const user = String(p.userId);
+        if (!/^\d{5,25}$/.test(user)) return;
+        if (!guild) throw new Error('The bot is not in the FBT Social server.');
+        const role = producerRole(guild);
+        if (!role) { await d.auditLog(guild, `✦ <@${user}> backed the Dev Fund, but there's no "Producer" role to give. Make one below the bot's role, then press Producer role on the gift in Control room → Shop.`); return; }
+        const member = await guild.members.fetch(user).catch(() => undefined);
+        if (!member) { await d.auditLog(guild, `✦ A Dev Fund supporter (<@${user}>) isn't in this server, so no Producer role yet. Press Producer role on their gift in Control room → Shop once they join.`); return; }
+        if (member.roles.cache.has(role)) { await d.auditLog(guild, `✦ <@${user}> backed the Dev Fund again. Already a Producer.`); return; }
+        try { await member.roles.add(role, 'FBT Social: Dev Fund supporter'); }
+        catch (e) {
+          await d.auditLog(guild, `✦ Couldn't give <@${user}> the Producer role (${e instanceof Error ? e.message : 'unknown error'}). Move the bot's role above Producer, then press Producer role on the gift in Control room → Shop.`);
+          return;
+        }
+        await d.auditLog(guild, `✦ <@${user}> backed the Dev Fund and is now a Producer.`);
+        await dm(user, producerDm(url));
         return;
       }
       case 'performer.roles': {

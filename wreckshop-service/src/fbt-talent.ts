@@ -171,3 +171,20 @@ export function pausedDm(p: { days: number; until: string; count: number; window
   };
 }
 
+
+// ── Dev Fund supporters (donor.thanked) ─────────────────────────────────────────────────────────
+
+/** The supporter role: "Producer" (also "Producers", "FBT Producer", or with a symbol in front like "✦ Producer"). */
+export const isProducerRoleName = (name: string) => /^[^\p{L}\p{N}]*(fbt\s*(social\s*)?)?producers?[^\p{L}\p{N}]*$/iu.test(name.trim());
+
+/** Thank-you DM when the Producer role is given. */
+export function producerDm(url: (x: string) => string): Msg {
+  const embed = new EmbedBuilder().setColor(GOLD).setTitle('✦ Thank you for backing FBT Social')
+    .setDescription([
+      'Your Dev Fund gift keeps the servers on and the next build coming.',
+      "You're a **Producer** now: the role is yours in our Discord.",
+      "Your thank-you world add-on is sent by hand when it drops, so keep an eye on your DMs.",
+    ].join('\n\n'))
+    .setFooter({ text: 'FBT Social · the after-dark Strip' });
+  return { embeds: [embed], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setLabel('The Dev Fund').setStyle(ButtonStyle.Link).setURL(url('/shop')))] };
+}

@@ -42,7 +42,7 @@ const ephemeral = MessageFlags.Ephemeral;
 const poster = new SlashCommandBuilder().setName('poster').setDescription('Wreckshop posters')
   .addSubcommand(s => s.setName('submit').setDescription('Submit a poster for review')
     .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
-    .addIntegerOption(o => o.setName('slot').setDescription('Poster number: 1–11 entrance & arrival (everyone), 12–32 club (Premium)').setMinValue(1).setMaxValue(32).setRequired(true))
+    .addIntegerOption(o => o.setName('slot').setDescription('Poster number: 1–11 entrance & arrival (everyone), 12–32 inside the club (Premium)').setMinValue(1).setMaxValue(32).setRequired(true))
     .addAttachmentOption(o => o.setName('image').setDescription('Static PNG, JPEG, or WebP').setRequired(true)))
   .addSubcommand(s => {
     s.setName('batch').setDescription('Submit up to eight posters for review at once')
@@ -300,7 +300,7 @@ async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: Text
 }
 async function handlePoster(i: ChatInputCommandInteraction): Promise<void> {
   const sub = i.options.getSubcommand();
-  if (sub === 'map') { await i.reply({ content: posterMap(), flags: ephemeral }); return; }
+  if (sub === 'map') { await i.reply({ content: posterMap(process.env.FBT_SITE_URL), flags: ephemeral }); return; }
   const groupId = i.options.getInteger('group',true);
   const group = requiredGroup(groupId);
   if (sub === 'list') {
@@ -525,7 +525,7 @@ const art = createArt({ store, dataDir, client, guildId, auditLog });
 const fbtSite = { url: process.env.FBT_SITE_URL, secret: process.env.FBT_BOT_SECRET };
 const fbt = createFbt({
   client, store, guildId, art,
-  site: fbtSite, dancerRoleId: process.env.FBT_DANCER_ROLE_ID, djRoleId: process.env.FBT_DJ_ROLE_ID,
+  site: fbtSite, dancerRoleId: process.env.FBT_DANCER_ROLE_ID, djRoleId: process.env.FBT_DJ_ROLE_ID, producerRoleId: process.env.FBT_PRODUCER_ROLE_ID,
   publicUrl: process.env.FBT_PUBLIC_URL ?? process.env.FBT_SITE_URL ?? 'https://dsc.gg/wreckshop',
   welcome, isAdmin: admin, auditLog,
 });
@@ -549,7 +549,7 @@ client.on('interactionCreate', async interaction => {
     else if (interaction.commandName === 'group') { await handleGroup(interaction); fbt.scheduleSync(); }
     else if (interaction.commandName === 'publish') await handlePublish(interaction);
     else if (interaction.commandName === 'ws-help') await interaction.reply({ content:
-      'New here? Run `/start` for the step-by-step: register, get verified, host a night, collab, and apply for Premium or Headliner. Advertise your group for free. Easiest way to manage your club: sign in at fbtsocial.com and open **My dashboard** (top right) to upload art, post nights and invite your team. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Posters are numbered in walking order: 1–6 entrance and sidewalk, 7–11 arrival hall (every group), 12–16 lower club and 17–32 upper club (Premium). `/poster map` lists every spot. Repeat batches as needed. Posters: portrait 2:3, recommended 1024 x 1536. Billboard: 2048 x 512. Photo backdrop: 2048 x 1536. Static PNG/JPEG/WebP, up to 12 MB and 30 MP, dimensions 256–8192 px. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
+      'New here? Run `/start` for the step-by-step: register, get verified, host a night, collab, and apply for Premium or Headliner. Advertise your group for free. Easiest way to manage your club: sign in at fbtsocial.com and open **My dashboard** (top right) to upload art, post nights and invite your team. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Posters are numbered in walking order: 1–6 entrance and sidewalk, 7–11 arrival hall and club doorway (every group), then 12–32 inside the club (Premium & Headliner): the main dance floor is 12–16, 22 and 27, the balconies and upper walkway the rest. `/poster map` lists every spot; fbtsocial.com/help#posters has floor plans and a photo of each. Repeat batches as needed. Posters: portrait 2:3, recommended 1024 x 1536. Billboard: 2048 x 512. Photo backdrop: 2048 x 1536. Static PNG/JPEG/WebP, up to 12 MB and 30 MP, dimensions 256–8192 px. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0,1500);
     if (interaction.isRepliable()) {
