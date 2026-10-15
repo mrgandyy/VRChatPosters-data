@@ -61,9 +61,14 @@ export function artOf(store: Store): Map<number, GroupArt> {
   return out;
 }
 
-/** Verified = VRChat group linked and hosting rules accepted. No staff step. */
-export function isVerified(g: Pick<Group, 'vrchatUrl' | 'agreementVersion'>): boolean {
-  return Boolean(g.vrchatUrl && g.agreementVersion);
+/**
+ * Since 15 Oct 2026, 20:00 UTC a club is verified only through the Discord Verified role, which the 18+ verify
+ * bot gives in the verify channel; this bot never verifies anyone. Before that, a linked VRChat group
+ * plus the accepted hosting rules also counted: clubs that got there before the cutoff keep it.
+ */
+export const ROLE_ONLY_SINCE = '2026-10-15 20:00:00'; // SQLite UTC timestamp format
+export function isVerified(g: Pick<Group, 'vrchatUrl' | 'agreementVersion' | 'agreementAt'>): boolean {
+  return Boolean(g.vrchatUrl && g.agreementVersion && g.agreementAt && g.agreementAt < ROLE_ONLY_SINCE);
 }
 
 export function vrcGroupId(url: string | null): string | null {
@@ -75,11 +80,11 @@ export function vrcGroupId(url: string | null): string | null {
  * The group counts as verified when one of its reps holds the Discord server's Verified role
  * (the owner's rule, Oct 2026), or the old way: VRChat group linked and rules accepted.
  */
-export function groupVerified(g: Pick<Group, 'vrchatUrl' | 'agreementVersion'>, reps: string[], verifiedUsers?: Set<string>): boolean {
+export function groupVerified(g: Pick<Group, 'vrchatUrl' | 'agreementVersion' | 'agreementAt'>, reps: string[], verifiedUsers?: Set<string>): boolean {
   return isVerified(g) || (!!verifiedUsers && reps.some(u => verifiedUsers.has(u)));
 }
 
-export function statusLabel(g: Pick<Group, 'tier' | 'level' | 'vrchatUrl' | 'agreementVersion'>, roleVerified = false): 'Headliner' | 'Premium' | 'Verified' | 'Registered' {
+export function statusLabel(g: Pick<Group, 'tier' | 'level' | 'vrchatUrl' | 'agreementVersion' | 'agreementAt'>, roleVerified = false): 'Headliner' | 'Premium' | 'Verified' | 'Registered' {
   if (g.tier === 'premium' && g.level === 'headliner') return 'Headliner';
   if (g.tier === 'premium') return 'Premium';
   return roleVerified || isVerified(g) ? 'Verified' : 'Registered';

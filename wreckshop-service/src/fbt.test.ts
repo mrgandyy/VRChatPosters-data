@@ -32,8 +32,7 @@ test('headliner sits on premium; the world catalog still says premium', () => {
     const g = s.registerGroup('Velvet Crown', 'standard', GRP, '100000000000000002');
     assert.equal(statusLabel(s.group(g.id)!), 'Registered');
     s.acceptAgreement(g.id, 'vrchat-rules-v1', '100000000000000002');
-    assert.equal(isVerified(s.group(g.id)!), true);
-    assert.equal(statusLabel(s.group(g.id)!), 'Verified');
+    assert.equal(statusLabel(s.group(g.id)!, true), 'Verified');
     s.setHeadliner(g.id, true);
     assert.equal(s.group(g.id)!.tier, 'premium');
     assert.equal(statusLabel(s.group(g.id)!), 'Headliner');
@@ -112,4 +111,13 @@ test('site client signs requests the way the website verifies them', async () =>
     assert.equal(off.ok, false);
     s.close();
   } finally { server.close(); }
+});
+
+test('only the Verified role verifies now; clubs verified the old way before the switch keep it', () => {
+  const linked = { vrchatUrl: `https://vrchat.com/home/group/${GRP}`, agreementVersion: 'vrchat-rules-v1' };
+  assert.equal(isVerified({ ...linked, agreementAt: '2026-10-14 21:05:00' }), true, 'grandfathered');
+  assert.equal(isVerified({ ...linked, agreementAt: '2026-10-15 20:00:01' }), false);
+  assert.equal(isVerified({ ...linked, agreementAt: null }), false);
+  assert.equal(isVerified({ vrchatUrl: null, agreementVersion: 'vrchat-rules-v1', agreementAt: '2026-10-01 00:00:00' }), false);
+  assert.equal(groupVerified({ ...linked, agreementAt: '2026-10-20 00:00:00' }, ['1'], new Set(['1'])), true, 'the role still verifies');
 });

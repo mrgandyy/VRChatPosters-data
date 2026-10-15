@@ -123,7 +123,43 @@ export function createFbt(d: FbtDeps) {
     if (guild && roleId) for (const m of guild.members.cache.values()) if (m.roles.cache.has(roleId)) out.add(m.id); else out.delete(m.id);
     return out;
   }
-  /** A group is verified when one of its reps has the Discord Verified role, or the old link + rules way. */
+  /** The channel where the 18+ verify bot works: setting fbt_verify_channel, else a text channel named like "verify". */
+  function verifyChannel(guild: Guild | undefined): TextChannel | undefined {
+    if (!guild) return undefined;
+    const set = store.setting('fbt_verify_channel');
+    const byId = set ? guild.channels.cache.get(set) : undefined;
+    if (byId?.type === ChannelType.GuildText) return byId as TextChannel;
+    const text = [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText) as TextChannel[];
+    return text.find(c => /^[^a-z0-9]*verif(y|ication)[^a-z0-9]*$/i.test(c.name)) ?? text.find(c => /verif/i.test(c.name) && !/un-?verified/i.test(c.name));
+  }
+  /** Does this member hold the Verified role the 18+ verify bot gives? undefined when there's no such role yet. */
+  async function memberVerified(userId: string): Promise<boolean | undefined> {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const roleId = guild && verifiedRoleId(guild);
+    if (!guild || !roleId) return undefined;
+    const member = await guild.members.fetch(userId).catch(() => undefined);
+    return Boolean(member?.roles.cache.has(roleId));
+  }
+  /** The reply for anyone without the Verified role: verify with the 18+ bot first. This bot never verifies. */
+  function notVerified(roleMissing: boolean) {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const ch = verifyChannel(guild);
+    const where = ch ? `<#${ch.id}>` : 'the verify channel';
+    const content = roleMissing
+      ? 'Verification isn\'t set up yet, so nothing here is unlocked. Ask staff.'
+      : `You need the **Verified** role first. Verify in ${where} with our 18+ verify bot, then come back and press **Check verification**.`;
+    const components = ch && guild ? [linkRow(['Go to verify', `https://discord.com/channels/${guild.id}/${ch.id}`])] : [];
+    return { content, components };
+  }
+  /** Stop here (and say why) unless the member has the Verified role. */
+  async function requireVerified(i: Reply): Promise<boolean> {
+    const ok = await memberVerified(i.user.id);
+    if (ok) return false;
+    const r = notVerified(ok === undefined);
+    await (i.deferred || i.replied ? i.editReply(r) : i.reply({ ...r, flags: EPHEMERAL }));
+    return true;
+  }
+  /** A group is verified when one of its reps has the Discord Verified role (clubs verified the old link + rules way before 15 Oct 2026 keep it). */
   function verifiedGroup(g: Group): boolean {
     return groupVerified(g, store.representatives(g.id), currentVerified());
   }
@@ -236,7 +272,7 @@ export function createFbt(d: FbtDeps) {
       .setDescription([
         'Any club can host at FBT Social. Every club gets its own building on **The Strip**, and the bigger your crowd, the brighter it burns.',
         '',
-        '**1 · Get the Verified role:** run our verify bot. Verified members can register a club and host.',
+        '**1 · Get the Verified role:** verify in the verify channel with our 18+ verify bot. Everything below unlocks once you have it.',
         '**2 · Register your club:** free, one minute. You get a club number and a door code for the world.',
         '**3 · Make it yours:** posters, logo, banner, gallery and your colour. Sign in at fbtsocial.com and open **My dashboard** (top right): it\'s your club\'s control panel.',
         '**4 · Host a night:** post it and it\'s announced here and lit up on the Strip. Crowds earn heat for the season.',
@@ -252,7 +288,7 @@ export function createFbt(d: FbtDeps) {
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('fbt:verify').setLabel('Get verified').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('fbt:verify').setLabel('Check verification').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('fbt:apply').setLabel('Apply: Premium / Headliner').setStyle(ButtonStyle.Secondary)),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId('fbt:host').setLabel('Host a night').setStyle(ButtonStyle.Secondary),
@@ -320,7 +356,7 @@ export function createFbt(d: FbtDeps) {
       '',
       verifiedGroup(g)
         ? `You're **verified**. Your resort gets bronze trim on the Strip, and collabs are unlocked.${linked ? '' : ' Link your VRChat group too: it adds the Join button in the world and lets us count your group rooms.'}`
-        : 'Get the **Verified** role from the verify bot, or finish both steps above. Either way it\'s instant.',
+        : 'Your club is verified when you have the **Verified** role from our 18+ verify bot, in the verify channel. Linking your group and the rules are still worth doing, but they don\'t verify you.',
     ];
     const row = new ActionRowBuilder<ButtonBuilder>();
     if (!linked) row.addComponents(new ButtonBuilder().setCustomId('fbt:link').setLabel('Link VRChat group').setStyle(ButtonStyle.Primary));
@@ -361,16 +397,21 @@ export function createFbt(d: FbtDeps) {
     const g = groupOf(i.user.id);
     switch (action) {
       case 'reg': {
+        if (await requireVerified(i)) return true;
         if (g) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
         await i.showModal(new ModalBuilder().setCustomId('fbt:regm').setTitle('Register your group').addLabelComponents(
           textInput('name', 'Group name (the real name, not a link)', TextInputStyle.Short, { max: 80 }),
           textInput('vrc', 'VRChat group link or grp_ ID (optional)', TextInputStyle.Short, { required: false, max: 200, placeholder: 'https://vrchat.com/home/group/grp_…' })));
         return true;
       }
-      case 'verify':
-        if (needGroup(i)) return true;
-        await i.reply({ ...verifyStatus(g!), flags: EPHEMERAL });
+      case 'verify': {
+        // Only checks the Verified role the 18+ verify bot gives; this bot never verifies anyone itself.
+        if (await requireVerified(i)) return true;
+        if (g) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
+        await say(i, '✓ You\'re verified. Next: register your club. It\'s free and takes a minute.', [new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary))]);
         return true;
+      }
       case 'link':
         if (needGroup(i)) return true;
         await i.showModal(new ModalBuilder().setCustomId('fbt:linkm').setTitle('Link your VRChat group').addLabelComponents(
@@ -401,6 +442,7 @@ export function createFbt(d: FbtDeps) {
         await d.auditLog(i.guild, `Group #${g!.id} accepted the hosting rules (<@${i.user.id}>).`);
         return true;
       case 'apply':
+        if (await requireVerified(i)) return true;
         if (needGroup(i)) return true;
         if (!verifiedGroup(g!)) { await i.reply({ ...verifyStatus(g!), flags: EPHEMERAL }); return true; }
         if (g!.level === 'headliner') { await say(i, `${g!.name} is already a Headliner. Nothing to apply for.`); return true; }
@@ -411,10 +453,12 @@ export function createFbt(d: FbtDeps) {
         await i.showModal(applyModal(action === 'applyp' ? 'premium' : 'headliner'));
         return true;
       case 'host':
+        if (await requireVerified(i)) return true;
         await say(i, 'Post your event on the website (easiest), or here with `/event create`. It shows up on the Strip\'s Coming Up view and gets announced in Discord.',
           [linkRow(['Host a night', url('/host')])]);
         return true;
       case 'collab':
+        if (await requireVerified(i)) return true;
         await say(i, 'Start a collab on the website, or here with `/collab start`. The other group confirms with one tap, and you both earn the night\'s heat in full, plus a bonus. Works before the night or up to 24 hours after.',
           [linkRow(['Collabs', url('/collabs')])]);
         return true;
