@@ -47,7 +47,7 @@ export function premiumWelcome(groupName: string, level: 'premium' | 'headliner'
   return {
     title: headliner ? `👑 ${groupName} is a Headliner!` : `🎉 ${groupName} is now Premium!`,
     description: headliner
-      ? 'Congratulations: you\'re at the top of the Strip. Your building gets the gold Headliner crown, top billing on the Strip and in #fbt-events, and everything Premium has.'
+      ? 'Congratulations: you\'re at the top of the Strip. You get Headliner billing in gold on the Marquee, your venue page and in #fbt-events, and everything Premium has.'
       : 'Congratulations, and welcome to the top tier of the Strip. Your club just unlocked the full FBT Social experience.',
     fields: [
       { name: 'What you unlocked', value: [

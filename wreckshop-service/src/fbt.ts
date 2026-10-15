@@ -318,7 +318,7 @@ export function createFbt(d: FbtDeps) {
   function startEmbed() {
     return new EmbedBuilder().setColor(ROSE).setTitle('Welcome to FBT Social')
       .setDescription([
-        'Any club can host at FBT Social. Every club gets its own building on **The Strip**, and the bigger your crowd, the brighter it burns.',
+        'Any club can host at FBT Social. Every club gets its own venue page and a place in the **Marquee** race, and the bigger your crowd, the higher you climb.',
         '',
         '**1 · Get the Verified role:** verify in the verify channel with our 18+ verify bot. Everything below unlocks once you have it.',
         '**2 · Register your club:** free, one minute. You get a club number and a door code for the world.',
@@ -403,7 +403,7 @@ export function createFbt(d: FbtDeps) {
       `${rules ? '✅' : '⬜'} Hosting rules accepted`,
       '',
       verifiedGroup(g)
-        ? `You're **verified**. Your resort gets bronze trim on the Strip, and collabs are unlocked.${linked ? '' : ' Link your VRChat group too: it adds the Join button in the world and lets us count your group rooms.'}`
+        ? `You're **verified**. You have the Verified badge, and collabs are unlocked.${linked ? '' : ' Link your VRChat group too: it adds the Join button in the world and lets us count your group rooms.'}`
         : 'Your club is verified when you have the **Verified** role from our 18+ verify bot, in the verify channel. Linking your group and the rules are still worth doing, but they don\'t verify you.',
     ];
     const row = new ActionRowBuilder<ButtonBuilder>();
