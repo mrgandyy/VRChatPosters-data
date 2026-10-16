@@ -2,7 +2,7 @@
 // applications with staff review, events and collabs. The website (fbt-social-web on Railway)
 // holds events, collabs and applications; this bot is the Discord front door to all of it.
 import {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, LabelBuilder, ModalBuilder, PermissionFlagsBits,
+  ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, LabelBuilder, ModalBuilder, PermissionFlagsBits,
   SlashCommandBuilder, TextInputBuilder, TextInputStyle, GuildScheduledEventEntityType, GuildScheduledEventPrivacyLevel,
   type AutocompleteInteraction, type ButtonInteraction, type ChatInputCommandInteraction, type Client, type Guild,
   type GuildMember, type ModalSubmitInteraction, type TextChannel, type User,
@@ -21,6 +21,7 @@ import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement }
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
 import { PERFORMER_LABEL, isPerformerKind, performerByDiscord, removePerformer, removePerformerArt, renamePerformer, upsertPerformer } from './performers.js';
 import { setStudioTheme } from './studio.js';
+import { auditSummary, auditText, lockDiff, lockedDm, lockedGroups, parseLocked, verifyAudit } from './verify-gate.js';
 
 const EPHEMERAL = 64; // MessageFlags.Ephemeral
 const RULES_VERSION = 'vrchat-rules-v1';
@@ -43,6 +44,8 @@ export interface FbtDeps {
   djRoleId?: string;
   /** Discord role for Dev Fund supporters (FBT_PRODUCER_ROLE_ID); else setting fbt_producer_role, else a role named "Producer". */
   producerRoleId?: string;
+  /** FBT_CODE_GATE=on: clubs with no rep holding the Verified role can't use their door code (verify-gate.ts). */
+  codeGate?: boolean;
 }
 
 type Reply = ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction;
@@ -123,7 +126,43 @@ export function createFbt(d: FbtDeps) {
     if (guild && roleId) for (const m of guild.members.cache.values()) if (m.roles.cache.has(roleId)) out.add(m.id); else out.delete(m.id);
     return out;
   }
-  /** A group is verified when one of its reps has the Discord Verified role, or the old link + rules way. */
+  /** The channel where the 18+ verify bot works: setting fbt_verify_channel, else a text channel named like "verify". */
+  function verifyChannel(guild: Guild | undefined): TextChannel | undefined {
+    if (!guild) return undefined;
+    const set = store.setting('fbt_verify_channel');
+    const byId = set ? guild.channels.cache.get(set) : undefined;
+    if (byId?.type === ChannelType.GuildText) return byId as TextChannel;
+    const text = [...guild.channels.cache.values()].filter(c => c.type === ChannelType.GuildText) as TextChannel[];
+    return text.find(c => /^[^a-z0-9]*verif(y|ication)[^a-z0-9]*$/i.test(c.name)) ?? text.find(c => /verif/i.test(c.name) && !/un-?verified/i.test(c.name));
+  }
+  /** Does this member hold the Verified role the 18+ verify bot gives? undefined when there's no such role yet. */
+  async function memberVerified(userId: string): Promise<boolean | undefined> {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const roleId = guild && verifiedRoleId(guild);
+    if (!guild || !roleId) return undefined;
+    const member = await guild.members.fetch(userId).catch(() => undefined);
+    return Boolean(member?.roles.cache.has(roleId));
+  }
+  /** The reply for anyone without the Verified role: verify with the 18+ bot first. This bot never verifies. */
+  function notVerified(roleMissing: boolean) {
+    const guild = d.client.guilds.cache.get(d.guildId);
+    const ch = verifyChannel(guild);
+    const where = ch ? `<#${ch.id}>` : 'the verify channel';
+    const content = roleMissing
+      ? 'Verification isn\'t set up yet, so nothing here is unlocked. Ask staff.'
+      : `You need the **Verified** role first. Verify in ${where} with our 18+ verify bot, then come back and press **Check verification**.`;
+    const components = ch && guild ? [linkRow(['Go to verify', `https://discord.com/channels/${guild.id}/${ch.id}`])] : [];
+    return { content, components };
+  }
+  /** Stop here (and say why) unless the member has the Verified role. */
+  async function requireVerified(i: Reply): Promise<boolean> {
+    const ok = await memberVerified(i.user.id);
+    if (ok) return false;
+    const r = notVerified(ok === undefined);
+    await (i.deferred || i.replied ? i.editReply(r) : i.reply({ ...r, flags: EPHEMERAL }));
+    return true;
+  }
+  /** A group is verified when one of its reps has the Discord Verified role (clubs verified the old link + rules way before 15 Oct 2026 keep it). */
   function verifiedGroup(g: Group): boolean {
     return groupVerified(g, store.representatives(g.id), currentVerified());
   }
@@ -194,6 +233,7 @@ export function createFbt(d: FbtDeps) {
         ? { members: [...guild.members.cache.keys()], verified: [...verified] } : undefined;
       const r = await syncGroups(store, d.site, await staffIds().catch(() => undefined), memberNames(), verified, people);
       await syncTierRoles().catch((e) => console.error('Tier role sync failed:', e));
+      await codeGate(guild, verified).catch((e) => console.error('Code gate check failed:', e));
       if (!r.ok) console.error('Website group sync failed:', r.error);
     }, delayMs);
   }
@@ -206,6 +246,50 @@ export function createFbt(d: FbtDeps) {
     const data = r.ok ? r.data : { mine: [], partners: [] };
     whoisCache.set(userId, { at: Date.now(), data });
     return data;
+  }
+
+
+  // ── The Verified-role code gate (verify-gate.ts) ──────────────────────────────────────────
+  /** The member list is trustworthy only right after a full fetch: never lock anyone from a partial cache. */
+  const fullScan = () => Boolean(d.welcome && scan && Date.now() - scan.at < 15 * 60_000);
+  function auditNow(guild: Guild) {
+    return verifyAudit(store.groups(), id => store.representatives(id), currentVerified(), new Set(guild.members.cache.keys()), memberNames());
+  }
+  async function codeGate(guild: Guild | undefined, verified: Set<string>): Promise<void> {
+    const saved = store.setting('verify_locked');
+    if (!d.codeGate) {
+      // Gate off: unlock everything that was locked, and forget the list so turning it on again is a fresh first sweep.
+      if (saved) {
+        const was = parseLocked(saved).size;
+        store.setSetting('verify_locked', '');
+        store.setSetting('catalog-dirty', '1');
+        if (was) await d.auditLog(guild ?? null, `✦ Code gate off: ${was} club${was === 1 ? '' : 's'} can use their door code again.`);
+      }
+      return;
+    }
+    if (!guild || !verifiedRoleId(guild) || !fullScan() || !verified) return;
+    const next = lockedGroups(auditNow(guild));
+    const first = !saved;
+    const diff = lockDiff(parseLocked(saved), next);
+    if (!first && !diff.locked.length && !diff.unlocked.length) return;
+    store.setSetting('verify_locked', JSON.stringify(next));
+    store.setSetting('catalog-dirty', '1');
+    const nameOf = (id: number) => `${store.group(id)?.name ?? 'Club'} (#${id})`;
+    if (first) {
+      // The first sweep after switching the gate on: no DMs (the owner reaches out personally).
+      await d.auditLog(guild, `✦ Code gate on: ${next.length} club${next.length === 1 ? '' : 's'} with no verified rep can't use their door code until a rep gets the Verified role.${next.length ? ` ${next.slice(0, 25).map(nameOf).join(', ')}${next.length > 25 ? '…' : ''}` : ''}`);
+      return;
+    }
+    const ch = verifyChannel(guild);
+    for (const id of diff.locked) {
+      await d.auditLog(guild, `✦ ${nameOf(id)}: no rep has the Verified role now, so its door code is paused.`);
+      for (const rep of store.representatives(id)) await dm(rep, lockedDm(store.group(id)?.name ?? 'your club', ch ? `<#${ch.id}>` : 'the verify channel'));
+    }
+    for (const id of diff.unlocked) await d.auditLog(guild, `✦ ${nameOf(id)}: a rep is verified (or the club is paused), so the door code works again.`);
+  }
+  /** Does this Discord user hold the Verified role? For the slash commands in bot.ts. */
+  async function isMemberVerified(userId: string): Promise<boolean> {
+    return Boolean(await memberVerified(userId));
   }
 
   // ── Channels ─────────────────────────────────────────────────────────────────────────────
@@ -234,17 +318,17 @@ export function createFbt(d: FbtDeps) {
   function startEmbed() {
     return new EmbedBuilder().setColor(ROSE).setTitle('Welcome to FBT Social')
       .setDescription([
-        'Any club can host at FBT Social. Every club gets its own building on **The Strip**, and the bigger your crowd, the brighter it burns.',
+        'Any club can host at FBT Social. Every club gets its own venue page and a place in the **Marquee** race, and the bigger your crowd, the higher you climb.',
         '',
-        '**1 · Get the Verified role:** run our verify bot. Verified members can register a club and host.',
+        '**1 · Get the Verified role:** verify in the verify channel with our 18+ verify bot. Everything below unlocks once you have it.',
         '**2 · Register your club:** free, one minute. You get a club number and a door code for the world.',
         '**3 · Make it yours:** posters, logo, banner, gallery and your colour. Sign in at fbtsocial.com and open **My dashboard** (top right): it\'s your club\'s control panel.',
-        '**4 · Host a night:** post it and it\'s announced here and lit up on the Strip. Crowds earn heat for the season.',
+        '**4 · Host a night:** post it and it\'s announced here and goes up on the Playbill. Crowds earn heat for the season.',
         '**5 · Collab:** team up with another club and you both earn the night\'s heat, plus a bonus.',
         '**6 · Premium or Headliner:** apply any time. Premium clubs run **age-verified (18+) rooms** and let our tracker **fbtheat** into their VRChat group.',
         '',
         '**Season 1 · Founders** runs Oct 12–31: every club that earns heat keeps a **Founding Venue** badge for good.',
-        'Just here to party? Find tonight\'s nights on the Strip.',
+        'Just here to party? Find tonight\'s nights on the Playbill.',
       ].join('\n'))
       .setURL(url('/start'));
   }
@@ -252,13 +336,13 @@ export function createFbt(d: FbtDeps) {
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('fbt:verify').setLabel('Get verified').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('fbt:verify').setLabel('Check verification').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('fbt:apply').setLabel('Apply: Premium / Headliner').setStyle(ButtonStyle.Secondary)),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId('fbt:host').setLabel('Host a night').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('fbt:collab').setLabel('Start a collab').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('fbt:posters').setLabel('Posters & billboards').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setLabel('The Strip').setStyle(ButtonStyle.Link).setURL(url('/'))),
+        new ButtonBuilder().setLabel('The website').setStyle(ButtonStyle.Link).setURL(url('/'))),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setLabel('My dashboard').setStyle(ButtonStyle.Link).setURL(url('/me')),
         new ButtonBuilder().setLabel('Leaderboard').setStyle(ButtonStyle.Link).setURL(url('/leaderboard')),
@@ -291,7 +375,7 @@ export function createFbt(d: FbtDeps) {
     const rows = [new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary),
       ...(start ? [new ButtonBuilder().setLabel('Open start-here').setStyle(ButtonStyle.Link).setURL(`https://discord.com/channels/${member.guild.id}/${start.id}`)] : []),
-      new ButtonBuilder().setLabel('The Strip').setStyle(ButtonStyle.Link).setURL(url('/start')))];
+      new ButtonBuilder().setLabel('Get started on the site').setStyle(ButtonStyle.Link).setURL(url('/start')))];
     await member.send({ embeds: [startEmbed()], components: rows }).catch(() => undefined); // closed DMs are fine
   }
 
@@ -319,8 +403,8 @@ export function createFbt(d: FbtDeps) {
       `${rules ? '✅' : '⬜'} Hosting rules accepted`,
       '',
       verifiedGroup(g)
-        ? `You're **verified**. Your resort gets bronze trim on the Strip, and collabs are unlocked.${linked ? '' : ' Link your VRChat group too: it adds the Join button in the world and lets us count your group rooms.'}`
-        : 'Get the **Verified** role from the verify bot, or finish both steps above. Either way it\'s instant.',
+        ? `You're **verified**. You have the Verified badge, and collabs are unlocked.${linked ? '' : ' Link your VRChat group too: it adds the Join button in the world and lets us count your group rooms.'}`
+        : 'Your club is verified when you have the **Verified** role from our 18+ verify bot, in the verify channel. Linking your group and the rules are still worth doing, but they don\'t verify you.',
     ];
     const row = new ActionRowBuilder<ButtonBuilder>();
     if (!linked) row.addComponents(new ButtonBuilder().setCustomId('fbt:link').setLabel('Link VRChat group').setStyle(ButtonStyle.Primary));
@@ -361,16 +445,21 @@ export function createFbt(d: FbtDeps) {
     const g = groupOf(i.user.id);
     switch (action) {
       case 'reg': {
+        if (await requireVerified(i)) return true;
         if (g) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
         await i.showModal(new ModalBuilder().setCustomId('fbt:regm').setTitle('Register your group').addLabelComponents(
           textInput('name', 'Group name (the real name, not a link)', TextInputStyle.Short, { max: 80 }),
           textInput('vrc', 'VRChat group link or grp_ ID (optional)', TextInputStyle.Short, { required: false, max: 200, placeholder: 'https://vrchat.com/home/group/grp_…' })));
         return true;
       }
-      case 'verify':
-        if (needGroup(i)) return true;
-        await i.reply({ ...verifyStatus(g!), flags: EPHEMERAL });
+      case 'verify': {
+        // Only checks the Verified role the 18+ verify bot gives; this bot never verifies anyone itself.
+        if (await requireVerified(i)) return true;
+        if (g) { await i.reply({ ...verifyStatus(g), flags: EPHEMERAL }); return true; }
+        await say(i, '✓ You\'re verified. Next: register your club. It\'s free and takes a minute.', [new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId('fbt:reg').setLabel('Register my group').setStyle(ButtonStyle.Primary))]);
         return true;
+      }
       case 'link':
         if (needGroup(i)) return true;
         await i.showModal(new ModalBuilder().setCustomId('fbt:linkm').setTitle('Link your VRChat group').addLabelComponents(
@@ -401,6 +490,7 @@ export function createFbt(d: FbtDeps) {
         await d.auditLog(i.guild, `Group #${g!.id} accepted the hosting rules (<@${i.user.id}>).`);
         return true;
       case 'apply':
+        if (await requireVerified(i)) return true;
         if (needGroup(i)) return true;
         if (!verifiedGroup(g!)) { await i.reply({ ...verifyStatus(g!), flags: EPHEMERAL }); return true; }
         if (g!.level === 'headliner') { await say(i, `${g!.name} is already a Headliner. Nothing to apply for.`); return true; }
@@ -411,10 +501,12 @@ export function createFbt(d: FbtDeps) {
         await i.showModal(applyModal(action === 'applyp' ? 'premium' : 'headliner'));
         return true;
       case 'host':
-        await say(i, 'Post your event on the website (easiest), or here with `/event create`. It shows up on the Strip\'s Coming Up view and gets announced in Discord.',
+        if (await requireVerified(i)) return true;
+        await say(i, 'Post your event on the website (easiest), or here with `/event create`. It goes up on the Playbill and gets announced in Discord.',
           [linkRow(['Host a night', url('/host')])]);
         return true;
       case 'collab':
+        if (await requireVerified(i)) return true;
         await say(i, 'Start a collab on the website, or here with `/collab start`. The other group confirms with one tap, and you both earn the night\'s heat in full, plus a bonus. Works before the night or up to 24 hours after.',
           [linkRow(['Collabs', url('/collabs')])]);
         return true;
@@ -542,11 +634,13 @@ export function createFbt(d: FbtDeps) {
     o.setName('timezone').setDescription('Your time zone (remembered after the first time)').addChoices(...TIMEZONES);
   const commands = [
     new SlashCommandBuilder().setName('start').setDescription('New here? Register, get verified, host and collab'),
+    new SlashCommandBuilder().setName('verify-audit').setDescription('Staff: clubs whose reps don\'t have the Verified role (only you see it)')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
     new SlashCommandBuilder().setName('apply').setDescription('Apply for Premium or Headliner')
       .addStringOption(o => o.setName('level').setDescription('What you are applying for').setRequired(true)
         .addChoices({ name: 'Premium', value: 'premium' }, { name: 'Headliner', value: 'headliner' })),
-    new SlashCommandBuilder().setName('event').setDescription('Your group\'s events on the Strip')
-      .addSubcommand(s => s.setName('create').setDescription('Post an event (announced here and on the Strip)')
+    new SlashCommandBuilder().setName('event').setDescription('Your group\'s events on the Playbill')
+      .addSubcommand(s => s.setName('create').setDescription('Post an event (announced here and on the Playbill)')
         .addStringOption(o => o.setName('title').setDescription('Show name').setRequired(true).setMaxLength(60))
         .addStringOption(o => o.setName('date').setDescription('friday, tomorrow, 10/17 …').setRequired(true).setMaxLength(20))
         .addStringOption(o => o.setName('time').setDescription('9pm, 21:00 …').setRequired(true).setMaxLength(10))
@@ -578,6 +672,18 @@ export function createFbt(d: FbtDeps) {
   }
 
   async function handleCommand(i: ChatInputCommandInteraction): Promise<boolean> {
+    if (i.commandName === 'verify-audit') {
+      if (!d.isAdmin(i)) { await say(i, 'Only Wreckshop admins can run the audit.'); return true; }
+      await i.deferReply({ flags: EPHEMERAL });
+      const guild = d.client.guilds.cache.get(d.guildId);
+      if (!guild) { await i.editReply('The bot isn\'t in the FBT Social server.'); return true; }
+      if (!verifiedRoleId(guild)) { await i.editReply('No Verified role found. Make sure the 18+ verify bot\'s role is named "Verified" (or set fbt_verified_role).'); return true; }
+      scan = undefined; await memberScan();
+      if (!fullScan()) { await i.editReply('I couldn\'t load the full member list (the Server Members intent is off), so the audit would be wrong. Turn welcomes on and try again.'); return true; }
+      const a = auditNow(guild);
+      await i.editReply({ content: auditSummary(a, Boolean(d.codeGate)), files: [new AttachmentBuilder(Buffer.from(auditText(a)), { name: 'verified-audit.txt' })] });
+      return true;
+    }
     if (i.commandName === 'start') {
       const g = groupOf(i.user.id);
       await i.reply({ embeds: [startEmbed()], components: startRows(), flags: EPHEMERAL });
@@ -605,7 +711,7 @@ export function createFbt(d: FbtDeps) {
           description: i.options.getString('description') ?? '', start: new Date(when.start).toISOString(), end: new Date(when.end).toISOString(),
           partners: partner ? [partner] : [],
         });
-        await i.editReply(!r.ok ? `⚠️ ${r.error}` : `Posted for ${discordTime(when.start)}. It'll be announced in the events channel and is on the Strip's Coming Up view.${
+        await i.editReply(!r.ok ? `⚠️ ${r.error}` : `Posted for ${discordTime(when.start)}. It'll be announced in the events channel and is on the Playbill.${
           r.data.collabError ? `\nThe collab request didn't go out: ${r.data.collabError}` : r.data.collabId ? '\nYour partner has been asked to confirm the collab.' : ''}`);
         return true;
       }
@@ -616,7 +722,7 @@ export function createFbt(d: FbtDeps) {
       }
       if (sub === 'cancel') {
         const r = await sitePost(d.site, '/api/bot/event', { action: 'cancel', actor: i.user.id, eventId: i.options.getString('event', true) });
-        await say(i, r.ok ? 'Event cancelled. It\'s off the Strip and the events channel has been told.' : `⚠️ ${r.error}`);
+        await say(i, r.ok ? 'Event cancelled. It\'s off the Playbill and the events channel has been told.' : `⚠️ ${r.error}`);
         return true;
       }
     }
@@ -747,7 +853,7 @@ export function createFbt(d: FbtDeps) {
         { name: 'Your stage art', value: `Upload a **${PERFORMER_LABEL.pole.toLowerCase()}** (tall 1:2, 512 × 1024), a **${PERFORMER_LABEL.chair.toLowerCase()}** (square) and a **${PERFORMER_LABEL.deck.toLowerCase()}** (square, dark background) on My dashboard. Staff check each one, then it shows in the world whenever you're the one performing.` },
         { name: 'Your VRChat name', value: 'The world recognises you by your VRChat display name. If you change it, we pick up the new one automatically within a day.' },
         { name: 'Nights', value: roles.dj ? 'Claim DJ sets and join dancer rosters on the Playbill, and watch #fbt-events for new nights.' : 'Find nights to dance at on the Playbill, and watch #fbt-events for new ones.' })
-      .setFooter({ text: 'FBT Social · the after-dark Strip' });
+      .setFooter({ text: 'FBT Social · Where VRChat takes the stage' });
   }
 
   /** Congratulations + getting started, for a club approved to Premium or Headliner. */
@@ -757,7 +863,7 @@ export function createFbt(d: FbtDeps) {
       linked: Boolean(g?.vrchatUrl), manageUrl: url(`/manage?group=${groupId}`), hostUrl: url('/host'), pageUrl: url('/'),
     });
     const embed = new EmbedBuilder().setColor(level === 'headliner' ? GOLD : EMERALD).setTitle(w.title).setDescription(w.description)
-      .addFields(w.fields.map(f => ({ name: f.name, value: f.value.slice(0, 1024) }))).setFooter({ text: 'FBT Social · the after-dark Strip' });
+      .addFields(w.fields.map(f => ({ name: f.name, value: f.value.slice(0, 1024) }))).setFooter({ text: 'FBT Social · Where VRChat takes the stage' });
     await dm(userId, { embeds: [embed], components: [linkRow(['My dashboard', url('/me')], ['Customize', url(`/manage?group=${groupId}`)], ['Host a night', url('/host')])] });
   }
 
@@ -812,7 +918,7 @@ export function createFbt(d: FbtDeps) {
           const embed = new EmbedBuilder().setColor(headliner ? GOLD : host?.tier === 'premium' ? EMERALD : BRONZE)
             .setTitle(p.title).setURL(url(`/v/${p.groupSlug}`))
             .setDescription(`${headliner ? '👑 **Headliner** · ' : ''}**${p.groupName}** · ${discordTime(start)} (${discordTime(start, 'R')})${p.description ? `\n\n${p.description}` : ''}`)
-            .setFooter({ text: 'FBT Social · RSVP on the Strip' });
+            .setFooter({ text: 'FBT Social · RSVP on the website' });
           // Events with a lineup get the interactive post (claimable DJ sets, join-the-roster button).
           const post = hasLineup(p) ? await lineupPost(String(p.eventId)) : undefined;
           if (post) {
@@ -1149,5 +1255,5 @@ export function createFbt(d: FbtDeps) {
     setInterval(() => void sitePost(d.site, '/api/cron/rollup', {}, 60_000), 10 * 60_000);
   }
 
-  return { commands, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver, artDecided, scheduleChannels };
+  return { commands, isMemberVerified, handleButton, handleModal, handleCommand, handleAutocomplete, onReady, onMemberAdd, scheduleSync, startLoops, pollOutbox, deliver, artDecided, scheduleChannels };
 }

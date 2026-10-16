@@ -384,6 +384,8 @@ async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
   }
   if (sub === 'register') {
     if (i.options.getString('tier') === 'premium' && !admin(i)) throw new Error('Premium is assigned by Wreckshop admins. Register a standard group first.');
+    // Registering needs the Verified role from the 18+ verify bot (the bot never verifies anyone itself).
+    if (!admin(i) && !(await fbt.isMemberVerified(i.user.id))) throw new Error('You need the Verified role first. Verify in the verify channel with our 18+ verify bot, then try again.');
     const name = validateGroupName(i.options.getString('name',true));
     const vrchatGroup = i.options.getString('vrchat_group') ?? undefined;
     if (i.options.getString('tier') === 'premium' && !vrchatGroup) throw new Error('Premium groups need their VRChat group ID. Provide vrchat_group:grp_<your-group-UUID>, found in your VRChat group page URL.');
@@ -525,7 +527,7 @@ const art = createArt({ store, dataDir, client, guildId, auditLog });
 const fbtSite = { url: process.env.FBT_SITE_URL, secret: process.env.FBT_BOT_SECRET };
 const fbt = createFbt({
   client, store, guildId, art,
-  site: fbtSite, dancerRoleId: process.env.FBT_DANCER_ROLE_ID, djRoleId: process.env.FBT_DJ_ROLE_ID, producerRoleId: process.env.FBT_PRODUCER_ROLE_ID,
+  site: fbtSite, dancerRoleId: process.env.FBT_DANCER_ROLE_ID, djRoleId: process.env.FBT_DJ_ROLE_ID, producerRoleId: process.env.FBT_PRODUCER_ROLE_ID, codeGate: process.env.FBT_CODE_GATE === 'on',
   publicUrl: process.env.FBT_PUBLIC_URL ?? process.env.FBT_SITE_URL ?? 'https://dsc.gg/wreckshop',
   welcome, isAdmin: admin, auditLog,
 });

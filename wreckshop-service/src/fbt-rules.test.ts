@@ -16,11 +16,11 @@ test('age promise: Premium and Headliner drop to Standard, once', () => {
   } finally { s.db.close(); }
 });
 
-test('inactivity: off the Strip as Standard, house protected, idempotent', () => {
+test('inactivity: off the site as Standard, house protected, idempotent', () => {
   const s = new Store(':memory:');
   try {
     const p = s.registerGroup('Quiet Lounge', 'premium');
-    assert.match(deactivateForInactivity(s, p.id)!, /came off the Strip/);
+    assert.match(deactivateForInactivity(s, p.id)!, /is resting \(off the site\)/);
     assert.ok(!s.group(p.id)!.enabled, 'disabled');
     assert.equal(s.group(p.id)!.tier, 'standard');
     assert.equal(deactivateForInactivity(s, p.id), null);

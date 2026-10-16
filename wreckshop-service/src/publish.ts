@@ -1,3 +1,4 @@
+import { parseLocked } from './verify-gate.js';
 import { liveBackdrop, prepareBackdrop, type BackdropRelease } from './backdrop.js';
 import { liveBillboard, prepareBillboard, type BannerRelease } from './billboard.js';
 import { liveBooth, prepareBooth, type BoothRelease } from './booth.js';
@@ -62,6 +63,8 @@ export async function publishCatalog(store: Store, config: PublishConfig): Promi
 }
 
 export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacement?: BannerRelease, backdropReplacement?: BackdropRelease, boothReplacement?: BoothRelease, studioReplacement?: StudioRelease): Buffer {
+  // Clubs with no rep holding the Verified role, while the code gate is on (verify-gate.ts): code not accepted.
+  const locked = parseLocked(store.setting('verify_locked'));
   const groups = store.groups().map(group => {
     const active = replacement?.groupId === group.id ? replacement : store.activeRelease(group.id);
     const studio = studioEntry(store, group, replacement?.groupId === group.id ? studioReplacement : undefined);
@@ -69,7 +72,7 @@ export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacemen
       id: group.id, name: group.name, tier: group.tier, code: group.code,
       // Public recognition is group-only; Discord identities remain private.
       representatives: [],
-      enabled: !!group.enabled, vrchatGroupUrl: group.tier === 'premium' ? group.vrchatUrl : null,
+      enabled: !!group.enabled && !locked.has(group.id), vrchatGroupUrl: group.tier === 'premium' ? group.vrchatUrl : null,
       atlasPoolIndex: active?.poolIndex ?? -1, revision: active?.revision ?? 0,
       atlasBPoolIndex: active && ((replacement?.groupId === group.id && replacement.sha256B) || sheetBRelease(store,group.id,active.revision)) ? active.poolIndex : -1,
       billboardPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && bannerReplacement ? bannerReplacement : liveBillboard(store,group.id))?.poolIndex ?? -1) : -1,

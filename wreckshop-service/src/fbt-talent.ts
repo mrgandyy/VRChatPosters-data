@@ -38,7 +38,7 @@ export function introHost(j: Joined, url: (p: string) => string): Msg {
       '',
       `**Say hi:** <@${j.performer.id}>. Send them the details (dress code, when to arrive, the instance) and a VRChat friend request or invite.`,
     ].join('\n'))
-    .setFooter({ text: 'FBT Social · the talent agency for the Strip' });
+    .setFooter({ text: 'FBT Social · the talent agency for every club' });
   const buttons = [link('Event page', url(`/e/${j.eventId}`))];
   if (j.performer.slug) buttons.push(link(`${who}'s page`, url(`/talent/${encodeURIComponent(j.performer.slug)}`)));
   const vrc = vrcUserUrl(j.performer.vrcId);
@@ -185,6 +185,6 @@ export function producerDm(url: (x: string) => string): Msg {
       "You're a **Producer** now: the role is yours in our Discord.",
       "Your thank-you world add-on is sent by hand when it drops, so keep an eye on your DMs.",
     ].join('\n\n'))
-    .setFooter({ text: 'FBT Social · the after-dark Strip' });
+    .setFooter({ text: 'FBT Social · Where VRChat takes the stage' });
   return { embeds: [embed], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setLabel('The Dev Fund').setStyle(ButtonStyle.Link).setURL(url('/shop')))] };
 }

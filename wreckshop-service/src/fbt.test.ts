@@ -32,8 +32,7 @@ test('headliner sits on premium; the world catalog still says premium', () => {
     const g = s.registerGroup('Velvet Crown', 'standard', GRP, '100000000000000002');
     assert.equal(statusLabel(s.group(g.id)!), 'Registered');
     s.acceptAgreement(g.id, 'vrchat-rules-v1', '100000000000000002');
-    assert.equal(isVerified(s.group(g.id)!), true);
-    assert.equal(statusLabel(s.group(g.id)!), 'Verified');
+    assert.equal(statusLabel(s.group(g.id)!, true), 'Verified');
     s.setHeadliner(g.id, true);
     assert.equal(s.group(g.id)!.tier, 'premium');
     assert.equal(statusLabel(s.group(g.id)!), 'Headliner');
@@ -75,13 +74,14 @@ test('sync payload mirrors groups, reps and verification for the website', () =>
   try {
     const g = s.registerGroup('WAYPOINT', 'standard', `https://vrchat.com/home/group/${GRP}`, '100000000000000001');
     s.acceptAgreement(g.id, 'vrchat-rules-v1', '100000000000000001');
-    const p = syncPayload(s);
+    const p = syncPayload(s, undefined, undefined, new Set(['100000000000000001']));
     assert.equal(p.full, true);
     const w = p.groups.find(x => x.id === g.id)!;
     assert.deepEqual({ ...w }, { id: g.id, name: 'WAYPOINT', tier: 'standard', headliner: false, verified: true, enabled: true, vrchatGroupId: GRP, reps: ['100000000000000001'], code: s.group(g.id)!.code, repNames: {}, art: { posters: [], billboard: false, backdrop: false, booth: false } });
     assert.deepEqual(syncPayload(s, undefined, new Map([['100000000000000001', 'Alice']])).groups.find(x => x.id === g.id)!.repNames, { '100000000000000001': 'Alice' });
     assert.equal(vrcGroupId(null), null);
     assert.equal('staff' in p, false, 'older payload shape when no staff list');
+    assert.equal(syncPayload(s).groups.find(x => x.id === g.id)!.verified, false, 'link + rules alone no longer verify (after the cutoff)');
     assert.deepEqual(syncPayload(s, ['100000000000000009', '100000000000000009', 'nope']).staff, ['100000000000000009'], 'staff deduped and checked');
   } finally { s.close(); }
 });
@@ -112,4 +112,13 @@ test('site client signs requests the way the website verifies them', async () =>
     assert.equal(off.ok, false);
     s.close();
   } finally { server.close(); }
+});
+
+test('only the Verified role verifies now; clubs verified the old way before the switch keep it', () => {
+  const linked = { vrchatUrl: `https://vrchat.com/home/group/${GRP}`, agreementVersion: 'vrchat-rules-v1' };
+  assert.equal(isVerified({ ...linked, agreementAt: '2026-10-14 21:05:00' }), true, 'grandfathered');
+  assert.equal(isVerified({ ...linked, agreementAt: '2026-10-15 20:00:01' }), false);
+  assert.equal(isVerified({ ...linked, agreementAt: null }), false);
+  assert.equal(isVerified({ vrchatUrl: null, agreementVersion: 'vrchat-rules-v1', agreementAt: '2026-10-01 00:00:00' }), false);
+  assert.equal(groupVerified({ ...linked, agreementAt: '2026-10-20 00:00:00' }, ['1'], new Set(['1'])), true, 'the role still verifies');
 });
