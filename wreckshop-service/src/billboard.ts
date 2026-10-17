@@ -42,7 +42,7 @@ export async function prepareBillboard(store:Store,groupId:number):Promise<{rele
   if(!group?.enabled || group.tier!=='premium')return undefined;
   const banner=store.db.prepare('SELECT b.* FROM billboards b JOIN billboard_assignments a ON a.submissionId=b.id WHERE a.groupId=?').get(groupId) as Banner|undefined;
   if(!banner)return undefined;
-  const bytes=await sharp(await readFile(banner.sourcePath)).resize(2048,512,{fit:'contain',background:'#18151c'}).removeAlpha().png().toBuffer();
+  const bytes=await sharp(await readFile(banner.sourcePath)).resize(2048,512,{fit:'fill'}).removeAlpha().png().toBuffer();
   const sha256=createHash('sha256').update(bytes).digest('hex');
   const history=JSON.parse(store.setting(`billboard-releases-${groupId}`)??'[]') as BannerRelease[];
   let release=history.find(r=>r.sha256===sha256);
