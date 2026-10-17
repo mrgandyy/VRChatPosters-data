@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import sharp from 'sharp';
 import { Store } from './db.js';
 import { catalog, lookOf, publishGroup } from './publish.js';
-import { decideStudioTexture, liveStudio, parseTheme, prepareStudioTexture, setStudioTheme, studioSlot, submitStudioTexture } from './studio.js';
+import { ROLE_KEYS, decideStudioTexture, liveStudio, parseTheme, parseVenue, prepareStudioTexture, setStudioTheme, studioSlot, submitStudioTexture } from './studio.js';
 
 const THEME = { accent: '#FF4FA3', glow: '#5fd4ff', glowLevel: 2, finish: 'marble', texture: true };
 const entry = (store: Store, id: number) => JSON.parse(catalog(store).toString()).groups.find((g: { id: number }) => g.id === id);
@@ -87,4 +87,29 @@ test('studio texture: review, 1024 x 1024 in a stable studio/ slot, texturePool 
     assert.equal(liveStudio(store, premium.id), undefined, 'its old texture no longer points at a slot it owns');
     assert.equal(entry(store, premium.id).studio.texturePool, -1);
   } finally { store.db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+const LOOK = { theme: 'neon_tokyo', roles: Object.fromEntries(ROLE_KEYS.map(k => [k, { f: k === 'Walls' ? 'neon_hex_panel' : '', b: 0, c: 1, s: -2, h: 12 }])) };
+
+test('pass 23: venue looks are validated and published as `venue`', () => {
+  assert.deepEqual(parseVenue(LOOK), LOOK);
+  assert.equal(parseVenue({ ...LOOK, theme: 'Bad Key!' }), undefined);
+  assert.equal(parseVenue({ ...LOOK, roles: { ...LOOK.roles, Wood: { f: '', b: 5, c: 0, s: 0, h: 0 } } }), undefined, 'tone out of range');
+  assert.equal(parseVenue({ ...LOOK, roles: { ...LOOK.roles, Wood: undefined } }), undefined, 'every role is needed');
+  const theme = parseTheme({ accent: '#123456', glow: '#abcdef', glowLevel: 0, venue: LOOK })!;
+  assert.deepEqual(theme, { accent: '#123456', glow: '#abcdef', glowLevel: 0, texture: false, venue: LOOK });
+  assert.equal(parseTheme({ accent: '#123456', glow: '#abcdef', glowLevel: 0, venue: { theme: '' } }), undefined);
+  const store = new Store(':memory:');
+  try {
+    const premium = store.registerGroup('Neon', 'premium');
+    const standard = store.registerGroup('Plain');
+    setStudioTheme(store, premium.id, { accent: '#21e6ff', glow: '#21e6ff', glowLevel: 2, venue: LOOK });
+    setStudioTheme(store, standard.id, { accent: '#21e6ff', glow: '#21e6ff', glowLevel: 2, venue: LOOK });
+    assert.deepEqual(entry(store, premium.id).venue, LOOK);
+    assert.deepEqual(entry(store, premium.id).studio, { accent: '#21e6ff', glow: '#21e6ff', finish: '', texturePool: -1 }, 'no texture with a venue look');
+    assert.equal(entry(store, premium.id).accent, '#21e6ff');
+    assert.equal(entry(store, standard.id).venue, undefined, 'Standard groups never get one');
+    setStudioTheme(store, premium.id, null);
+    assert.equal(entry(store, premium.id).venue, undefined, 'cleared');
+  } finally { store.db.close(); }
 });

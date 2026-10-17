@@ -2,7 +2,7 @@ import { parseLocked } from './verify-gate.js';
 import { liveBackdrop, prepareBackdrop, type BackdropRelease } from './backdrop.js';
 import { liveBillboard, prepareBillboard, type BannerRelease } from './billboard.js';
 import { liveBooth, prepareBooth, type BoothRelease } from './booth.js';
-import { liveStudio, prepareStudioTexture, studioEntry, studioTheme, type StudioRelease } from './studio.js';
+import { liveStudio, prepareStudioTexture, studioEntry, studioTheme, venueEntry, type StudioRelease } from './studio.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -68,6 +68,7 @@ export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacemen
   const groups = store.groups().map(group => {
     const active = replacement?.groupId === group.id ? replacement : store.activeRelease(group.id);
     const studio = studioEntry(store, group, replacement?.groupId === group.id ? studioReplacement : undefined);
+    const venue = venueEntry(store, group);
     return {
       id: group.id, name: group.name, tier: group.tier, code: group.code,
       // Public recognition is group-only; Discord identities remain private.
@@ -86,6 +87,8 @@ export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacemen
       ...lookOf(store, group.id),
       // Venue Studio (Premium/Headliner with a saved theme only): applied once when the code is activated.
       ...(studio ? { studio } : {}),
+      // Pass 23: the club's saved look from the world's finish library, applied by FBTVenueStudio on code activation.
+      ...(venue ? { venue } : {}),
     };
   });
   return Buffer.from(JSON.stringify({ schema: 1, brand: 'Wreckshop Worlds',
