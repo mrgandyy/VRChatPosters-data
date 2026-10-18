@@ -18,9 +18,18 @@ import { SLOT_POOL_CAPACITY, slotPoolPath } from './url-pool.js';
 export const FINISHES = ['walnut', 'marble', 'velvet', 'bronze', 'charcoal'] as const;
 export type Finish = typeof FINISHES[number];
 export const STUDIO_TEXTURE_SIZE = 1024;
-export interface StudioTheme { accent: string; glow: string; glowLevel: 0 | 1 | 2; finish: Finish; texture: boolean }
+/**
+ * Pass 23: the website saves a full look from the world's own finish library instead of one finish word:
+ *   "venue": { "theme": "<theme key or empty>", "roles": { "<RoleKey>": { "f": "<finish id or empty>", "b", "c", "s": -4..4, "h": -12..12 } } }
+ * The world applies it on code activation by those ids (FBTVenueStudio). Finish ids are checked against the world's
+ * library on the website; here only their shape is checked. Older single-finish themes stay valid.
+ */
+export const ROLE_KEYS = ['PrimaryStone', 'FloorColumns', 'Wood', 'MetalTrim', 'Walls', 'Upholstery'] as const;
+export interface RoleLook { f: string; b: number; c: number; s: number; h: number }
+export interface VenueLook { theme: string; roles: Record<string, RoleLook> }
+export interface StudioTheme { accent: string; glow: string; glowLevel: 0 | 1 | 2; finish?: Finish; texture: boolean; venue?: VenueLook }
 export interface StudioRelease { poolIndex: number; sha256: string; path: string }
-export interface StudioEntry { accent: string; glow: string; finish: Finish; texturePool: number }
+export interface StudioEntry { accent: string; glow: string; finish: Finish | ''; texturePool: number }
 
 export function initializeStudio(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS studio_textures (
@@ -34,15 +43,38 @@ export function initializeStudio(store: Store): void {
 }
 
 const HEX = /^#[0-9a-f]{6}$/;
+const ID = /^[a-z0-9_]{0,48}$/;
+const step = (x: unknown, lim: number) => (typeof x === 'number' && Number.isInteger(x) && Math.abs(x) <= lim ? x : undefined);
+/** A look from the website, checked again here (shape only). Undefined when anything is off. */
+export function parseVenue(raw: unknown): VenueLook | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const v = raw as { theme?: unknown; roles?: unknown };
+  const theme = typeof v.theme === 'string' && ID.test(v.theme) ? v.theme : undefined;
+  if (theme === undefined || !v.roles || typeof v.roles !== 'object') return undefined;
+  const roles: Record<string, RoleLook> = {};
+  for (const key of ROLE_KEYS) {
+    const r = (v.roles as Record<string, unknown>)[key] as Record<string, unknown> | undefined;
+    if (!r || typeof r !== 'object' || typeof r.f !== 'string' || !ID.test(r.f)) return undefined;
+    const b = step(r.b, 4), c = step(r.c, 4), s = step(r.s, 4), h = step(r.h, 12);
+    if (b === undefined || c === undefined || s === undefined || h === undefined) return undefined;
+    roles[key] = { f: r.f, b, c, s, h };
+  }
+  return { theme, roles };
+}
 /** A theme from the website, checked again here. Undefined when anything is off. */
 export function parseTheme(raw: unknown): StudioTheme | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const v = raw as Record<string, unknown>;
   const accent = typeof v.accent === 'string' ? v.accent.toLowerCase() : '';
   const glow = typeof v.glow === 'string' ? v.glow.toLowerCase() : '';
-  const finish = String(v.finish) as Finish;
   const glowLevel = v.glowLevel === 0 || v.glowLevel === 2 ? v.glowLevel : 1;
-  if (!HEX.test(accent) || !HEX.test(glow) || !FINISHES.includes(finish)) return undefined;
+  if (!HEX.test(accent) || !HEX.test(glow)) return undefined;
+  if (v.venue !== undefined) {
+    const venue = parseVenue(v.venue);
+    return venue ? { accent, glow, glowLevel, texture: false, venue } : undefined;
+  }
+  const finish = String(v.finish) as Finish;
+  if (!FINISHES.includes(finish)) return undefined;
   return { accent, glow, glowLevel, finish, texture: v.texture !== false };
 }
 export function studioTheme(store: Store, groupId: number): StudioTheme | undefined {
@@ -132,6 +164,12 @@ export function studioEntry(store: Store, group: Group, replacement?: StudioRele
   if (!eligible(group)) return undefined;
   const theme = studioTheme(store, group.id);
   if (!theme) return undefined;
-  const texture = theme.texture ? (replacement ?? liveStudio(store, group.id)) : undefined;
-  return { accent: theme.accent, glow: theme.glow, finish: theme.finish, texturePool: texture?.poolIndex ?? -1 };
+  const texture = theme.texture && !theme.venue ? (replacement ?? liveStudio(store, group.id)) : undefined;
+  return { accent: theme.accent, glow: theme.glow, finish: theme.finish ?? '', texturePool: texture?.poolIndex ?? -1 };
+}
+
+/** The catalog's `venue` look (pass 23), or undefined (Standard, suspended, or no saved look). */
+export function venueEntry(store: Store, group: Group): VenueLook | undefined {
+  if (!eligible(group)) return undefined;
+  return studioTheme(store, group.id)?.venue;
 }
