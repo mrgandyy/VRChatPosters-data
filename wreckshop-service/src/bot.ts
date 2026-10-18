@@ -591,6 +591,14 @@ client.once('ready', async () => {
     store.setSetting('pages-recovery-20261005','queued');
     console.log(`Queued ${failed.length} interrupted public-data publications for recovery.`);
   }
+  // One-time: billboards, backdrops and booth fronts now stretch to fill their frame (like posters) instead of
+  // being letterboxed. Re-publish every enabled Premium group once so their live art is re-cut.
+  if (!publishConfig.dryRun && !store.setting('world-art-fill-20261017')) {
+    const premium = store.groups().filter(g => g.enabled && g.tier === 'premium');
+    for (const g of premium) store.queuePublish(g.id);
+    store.setSetting('world-art-fill-20261017','queued');
+    console.log(`Queued ${premium.length} Premium groups to re-cut their world art (stretch to fill).`);
+  }
   if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
     try { await fbt.onReady(guild); console.log('FBT Social start-here and events channels ready.'); }
     catch (error) { console.error('FBT Social setup failed:',error); }

@@ -42,7 +42,7 @@ export async function prepareBackdrop(store:Store,groupId:number):Promise<{relea
   if(!group?.enabled || group.tier!=='premium')return undefined;
   const banner=store.db.prepare('SELECT b.* FROM backdrops b JOIN backdrop_assignments a ON a.submissionId=b.id WHERE a.groupId=?').get(groupId) as Backdrop|undefined;
   if(!banner)return undefined;
-  const bytes=await sharp(await readFile(banner.sourcePath)).resize(2048,1536,{fit:'contain',background:'#18151c'}).removeAlpha().png().toBuffer();
+  const bytes=await sharp(await readFile(banner.sourcePath)).resize(2048,1536,{fit:'fill'}).removeAlpha().png().toBuffer();
   const sha256=createHash('sha256').update(bytes).digest('hex');
   const history=JSON.parse(store.setting(`backdrop-releases-${groupId}`)??'[]') as BackdropRelease[];
   let release=history.find(r=>r.sha256===sha256);

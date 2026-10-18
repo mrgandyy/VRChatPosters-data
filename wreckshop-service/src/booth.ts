@@ -46,7 +46,7 @@ export async function prepareBooth(store:Store,groupId:number):Promise<{release:
   if(!group?.enabled || group.tier!=='premium')return undefined;
   const booth=store.db.prepare('SELECT b.* FROM booths b JOIN booth_assignments a ON a.submissionId=b.id WHERE a.groupId=?').get(groupId) as Booth|undefined;
   if(!booth)return undefined;
-  const bytes=await sharp(await readFile(booth.sourcePath)).resize(BOOTH_WIDTH,BOOTH_HEIGHT,{fit:'contain',background:'#18151c'}).removeAlpha().png().toBuffer();
+  const bytes=await sharp(await readFile(booth.sourcePath)).resize(BOOTH_WIDTH,BOOTH_HEIGHT,{fit:'fill'}).removeAlpha().png().toBuffer();
   const sha256=createHash('sha256').update(bytes).digest('hex');
   const history=JSON.parse(store.setting(`booth-releases-${groupId}`)??'[]') as BoothRelease[];
   let release=history.find(r=>r.sha256===sha256);
