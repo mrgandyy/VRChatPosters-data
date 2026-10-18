@@ -19,6 +19,7 @@ import type { Group } from './types.js';
 import type { Art, ArtKind } from './fbt-art.js';
 import { channelInventory, deleteChannel, ensureArtworkGuide, postAnnouncement } from './fbt-discord.js';
 import { deactivateForInactivity, demoteDm, demoteForAge, premiumWelcome } from './fbt-rules.js';
+import { expireTrials, noticeRecipients, redeemTrial, tiersExplainer, trialEndedDm, TRIAL_ENDS, updateNotice } from './fbt-trial.js';
 import { PERFORMER_LABEL, isPerformerKind, performerByDiscord, removePerformer, removePerformerArt, renamePerformer, upsertPerformer } from './performers.js';
 import { setStudioTheme } from './studio.js';
 import { auditSummary, auditText, lockDiff, lockedDm, lockedGroups, parseLocked, verifyAudit } from './verify-gate.js';
@@ -350,6 +351,16 @@ export function createFbt(d: FbtDeps) {
     ];
   }
 
+  /** Premium & Headliner explained, right under the Start Here panel (posted once, then kept current). */
+  async function postTiers(start: TextChannel): Promise<void> {
+    const t = tiersExplainer();
+    const tiers = { embeds: [new EmbedBuilder().setColor(GOLD).setTitle(t.title).setDescription(t.description).addFields(t.fields).setURL(url('/help'))] };
+    const old = store.setting('fbt_tiers_panel');
+    const msg = old ? await start.messages.fetch(old).catch(() => undefined) : undefined;
+    if (msg) await msg.edit(tiers);
+    else store.setSetting('fbt_tiers_panel', (await start.send(tiers)).id);
+  }
+
   async function onReady(guild: Guild): Promise<void> {
     await Promise.all([guild.channels.fetch(), guild.members.fetchMe()]);
     const start = await ensureChannel(guild, 'fbt_start_channel', 'start-here', true);
@@ -359,6 +370,8 @@ export function createFbt(d: FbtDeps) {
     const msg = old ? await start.messages.fetch(old).catch(() => undefined) : undefined;
     if (msg) await msg.edit(panel);
     else store.setSetting('fbt_start_panel', (await start.send(panel)).id);
+    await postTiers(start);
+    void sendUpdateNotice(start.id);
     console.log(await ensureArtworkGuide(guild, store, d.publicUrl).catch(e => `Artwork guide failed: ${e.message}`));
     scheduleSync(1000);
   }
@@ -634,6 +647,7 @@ export function createFbt(d: FbtDeps) {
     o.setName('timezone').setDescription('Your time zone (remembered after the first time)').addChoices(...TIMEZONES);
   const commands = [
     new SlashCommandBuilder().setName('start').setDescription('New here? Register, get verified, host and collab'),
+    new SlashCommandBuilder().setName('redeem').setDescription('Premium clubs: try Headliner free until October 31'),
     new SlashCommandBuilder().setName('verify-audit').setDescription('Staff: clubs whose reps don\'t have the Verified role (only you see it)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
     new SlashCommandBuilder().setName('apply').setDescription('Apply for Premium or Headliner')
@@ -682,6 +696,16 @@ export function createFbt(d: FbtDeps) {
       if (!fullScan()) { await i.editReply('I couldn\'t load the full member list (the Server Members intent is off), so the audit would be wrong. Turn welcomes on and try again.'); return true; }
       const a = auditNow(guild);
       await i.editReply({ content: auditSummary(a, Boolean(d.codeGate)), files: [new AttachmentBuilder(Buffer.from(auditText(a)), { name: 'verified-audit.txt' })] });
+      return true;
+    }
+    if (i.commandName === 'redeem') {
+      const r = redeemTrial(store, i.user.id);
+      await say(i, r.reply);
+      if (r.granted.length) {
+        const guild = d.client.guilds.cache.get(d.guildId) ?? null;
+        for (const g of r.granted) await d.auditLog(guild, `👑 ${g.name} (#${g.id}) redeemed the Headliner trial (until Oct 31) via <@${i.user.id}>.`);
+        scheduleSync(0);
+      }
       return true;
     }
     if (i.commandName === 'start') {
@@ -1225,6 +1249,36 @@ export function createFbt(d: FbtDeps) {
     }, delayMs);
   }
 
+  // One-time update DM to every club owner (owner, 17 Oct 2026). Sent once, slowly, in the background.
+  const NOTICE_KEY = 'fbt-notice-2026-10-update';
+  async function sendUpdateNotice(startHereId: string): Promise<void> {
+    if (store.setting(NOTICE_KEY)) return;
+    store.setSetting(NOTICE_KEY, new Date().toISOString());
+    let sent = 0, failed = 0;
+    for (const [user, clubs] of noticeRecipients(store)) {
+      if (await dm(user, updateNotice(clubs, startHereId))) sent++; else failed++;
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    await d.auditLog(d.client.guilds.cache.get(d.guildId) ?? null, `📨 Update notice sent to ${sent} club owner${sent === 1 ? '' : 's'}${failed ? ` (${failed} have DMs closed)` : ''}.`);
+  }
+
+  /** Headliner trials that ran out go back to Premium, with a DM. */
+  async function checkTrials(): Promise<void> {
+    // After October the explainer drops its /redeem line (once).
+    if (Date.now() >= TRIAL_ENDS && !store.setting('fbt-tiers-after-trial')) {
+      const start = channel('fbt_start_channel');
+      if (start) { await postTiers(start); store.setSetting('fbt-tiers-after-trial', '1'); }
+    }
+    const ended = expireTrials(store);
+    if (!ended.length) return;
+    const guild = d.client.guilds.cache.get(d.guildId) ?? null;
+    for (const g of ended) {
+      await d.auditLog(guild, `👑 ${g.name} (#${g.id})'s Headliner trial ended: back to Premium.`);
+      for (const rep of store.representatives(g.id)) await dm(rep, trialEndedDm(g.name, url('/apply')));
+    }
+    scheduleSync(0);
+  }
+
   let polling = false;
   let pendingAck: number[] = [], pendingFailed: OutboxFailure[] = [];
   async function pollOutbox(): Promise<void> {
@@ -1249,6 +1303,8 @@ export function createFbt(d: FbtDeps) {
   function startLoops(): void {
     if (!siteEnabled(d.site)) { console.log('FBT website link not configured (FBT_SITE_URL / FBT_BOT_SECRET); website features are off.'); return; }
     setInterval(() => void pollOutbox(), 8_000);
+    setTimeout(() => void checkTrials().catch(e => console.error('Trial check failed:', e)), 20_000);
+    setInterval(() => void checkTrials().catch(e => console.error('Trial check failed:', e)), 10 * 60_000);
     setInterval(() => scheduleSync(0), 3 * 60_000);
     scheduleChannels(15_000);
     setInterval(() => scheduleChannels(0), 15 * 60_000);

@@ -32,7 +32,7 @@ test('messages: the welcome walks through the promise; the demotion says how to 
   const w = premiumWelcome('Promise Club', 'headliner', { linked: false, manageUrl: 'https://x/manage', hostUrl: 'https://x/host', pageUrl: 'https://x/' });
   assert.match(w.title, /Headliner/);
   const all = w.fields.map(f => f.value).join('\n');
-  assert.match(all, /age-verified \(18\+\)/); assert.match(all, /fbtheat/); assert.match(all, /7 days/); assert.match(all, /\/group link/);
+  assert.match(all, /age-verified \(18\+\)/); assert.match(all, /fbtheat/); assert.match(all, /30 days/); assert.match(all, /\/group link/);
   assert.ok(w.fields.every(f => f.value.length <= 1024 && f.name.length <= 256), 'fits Discord embed limits');
   const linked = premiumWelcome('Promise Club', 'premium', { linked: true, manageUrl: 'm', hostUrl: 'h', pageUrl: 'p' });
   assert.match(linked.fields.map(f => f.value).join('\n'), /sent \*\*fbtheat\*\* a request/);

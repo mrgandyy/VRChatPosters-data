@@ -2,6 +2,7 @@
 // checks that the person is staff before queueing; the bot is the source of truth for groups, so
 // it applies the change here and syncs the result back.
 import type { Store } from './db.js';
+import { endTrialRecord } from './fbt-trial.js';
 
 export type Level = 'standard' | 'premium' | 'headliner';
 export type AdminAction =
@@ -19,8 +20,9 @@ export type AdminAction =
 
 export const LEVEL_LABEL: Record<Level, string> = { standard: 'Standard', premium: 'Premium', headliner: 'Headliner' };
 
-/** Applies one level, keeping tier + headliner flag consistent. */
+/** Applies one level, keeping tier + headliner flag consistent. Any change ends a Headliner trial. */
 export function setLevel(store: Store, groupId: number, level: Level): void {
+  endTrialRecord(store, groupId);
   if (level === 'headliner') { store.setHeadliner(groupId, true); return; }
   if (store.group(groupId)?.level) store.setHeadliner(groupId, false);
   store.setTier(groupId, level);
