@@ -23,9 +23,13 @@ export const STUDIO_TEXTURE_SIZE = 1024;
  *   "venue": { "theme": "<theme key or empty>", "roles": { "<RoleKey>": { "f": "<finish id or empty>", "b", "c", "s": -4..4, "h": -12..12 } } }
  * The world applies it on code activation by those ids (FBTVenueStudio). Finish ids are checked against the world's
  * library on the website; here only their shape is checked. Older single-finish themes stay valid.
+ * Pass 35 (world 20 Oct): optional per role, the same steps as the world's tablet: "fb" base brightness, "r" roughness,
+ * "rf" reflections, "d" surface depth, "ps" pattern size (−4..4), "m" metallic (−4..0), "pr" pattern rotation (0..7).
+ * They are passed on only when not 0, so older looks publish exactly as before.
  */
 export const ROLE_KEYS = ['PrimaryStone', 'FloorColumns', 'Wood', 'MetalTrim', 'Walls', 'Upholstery'] as const;
-export interface RoleLook { f: string; b: number; c: number; s: number; h: number }
+export interface RoleLook { f: string; b: number; c: number; s: number; h: number; fb?: number; r?: number; m?: number; rf?: number; d?: number; ps?: number; pr?: number }
+const EXTRA: Record<'fb' | 'r' | 'm' | 'rf' | 'd' | 'ps' | 'pr', [number, number]> = { fb: [-4, 4], r: [-4, 4], m: [-4, 0], rf: [-4, 4], d: [-4, 4], ps: [-4, 4], pr: [0, 7] };
 export interface VenueLook { theme: string; roles: Record<string, RoleLook> }
 export interface StudioTheme { accent: string; glow: string; glowLevel: 0 | 1 | 2; finish?: Finish; texture: boolean; venue?: VenueLook }
 export interface StudioRelease { poolIndex: number; sha256: string; path: string }
@@ -57,7 +61,13 @@ export function parseVenue(raw: unknown): VenueLook | undefined {
     if (!r || typeof r !== 'object' || typeof r.f !== 'string' || !ID.test(r.f)) return undefined;
     const b = step(r.b, 4), c = step(r.c, 4), s = step(r.s, 4), h = step(r.h, 12);
     if (b === undefined || c === undefined || s === undefined || h === undefined) return undefined;
-    roles[key] = { f: r.f, b, c, s, h };
+    const look: RoleLook = { f: r.f, b, c, s, h };
+    for (const [k, [lo, hi]] of Object.entries(EXTRA) as [keyof typeof EXTRA, [number, number]][]) {
+      const x = r[k] ?? 0;
+      if (typeof x !== 'number' || !Number.isInteger(x) || x < lo || x > hi) return undefined;
+      if (x !== 0) look[k] = x;
+    }
+    roles[key] = look;
   }
   return { theme, roles };
 }

@@ -96,6 +96,12 @@ test('pass 23: venue looks are validated and published as `venue`', () => {
   assert.equal(parseVenue({ ...LOOK, theme: 'Bad Key!' }), undefined);
   assert.equal(parseVenue({ ...LOOK, roles: { ...LOOK.roles, Wood: { f: '', b: 5, c: 0, s: 0, h: 0 } } }), undefined, 'tone out of range');
   assert.equal(parseVenue({ ...LOOK, roles: { ...LOOK.roles, Wood: undefined } }), undefined, 'every role is needed');
+  // pass 35: base brightness, surface and pattern steps pass through when set; zeros are dropped; out of range rejects
+  const tuned = { ...LOOK, roles: { ...LOOK.roles, Wood: { ...LOOK.roles.Wood, fb: 2, r: -1, m: 0, rf: 3, d: -4, ps: 1, pr: 7 } } };
+  assert.deepEqual(parseVenue(tuned)!.roles.Wood, { ...LOOK.roles.Wood, fb: 2, r: -1, rf: 3, d: -4, ps: 1, pr: 7 });
+  assert.equal(parseVenue({ ...LOOK, roles: { ...LOOK.roles, Wood: { ...LOOK.roles.Wood, m: 1 } } }), undefined, 'metallic only tones down');
+  assert.equal(parseVenue({ ...LOOK, roles: { ...LOOK.roles, Wood: { ...LOOK.roles.Wood, pr: 8 } } }), undefined, 'rotation 0..7');
+  assert.equal(parseVenue({ ...LOOK, roles: { ...LOOK.roles, Wood: { ...LOOK.roles.Wood, ps: 1.5 } } }), undefined, 'whole steps');
   const theme = parseTheme({ accent: '#123456', glow: '#abcdef', glowLevel: 0, venue: LOOK })!;
   assert.deepEqual(theme, { accent: '#123456', glow: '#abcdef', glowLevel: 0, texture: false, venue: LOOK });
   assert.equal(parseTheme({ accent: '#123456', glow: '#abcdef', glowLevel: 0, venue: { theme: '' } }), undefined);
