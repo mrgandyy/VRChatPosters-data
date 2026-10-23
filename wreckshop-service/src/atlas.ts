@@ -90,8 +90,9 @@ export async function buildAtlas(store: Store, groupId: number, defaultsDir: str
     parts.push({ input: await cell(source), left: (i % 4) * CELL_SIZE,
       top: Math.floor(i / 4) * CELL_SIZE });
   }
+  // Opaque RGB: composite would otherwise emit an all-255 alpha channel (about a third of the file, same pixels).
   const bytes = await sharp({ create: { width: ATLAS_SIZE, height: ATLAS_SIZE, channels: 3,
-    background: '#211c21' } }).composite(parts).png({ compressionLevel: 9 }).toBuffer();
+    background: '#211c21' } }).composite(parts).removeAlpha().png({ compressionLevel: 9 }).toBuffer();
   return { bytes, sha256: sha256(bytes), sourceHash: contentHash.digest('hex') };
 }
 

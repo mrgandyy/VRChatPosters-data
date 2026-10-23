@@ -6,8 +6,10 @@ import { createHash } from 'node:crypto';
 import type { Store } from './db.js';
 import { assetPath, reserveUrl } from './url-pool.js';
 
-export const BOOTH_WIDTH = 2400;
-export const BOOTH_HEIGHT = 400;
+// VRChat refuses downloaded images wider or taller than 2048 px, so the 6:1 front is published at 2048 x 341.
+// Uploads can still be 2400 x 400 (the template size); they are fitted down.
+export const BOOTH_WIDTH = 2048;
+export const BOOTH_HEIGHT = 341;
 export interface Booth { id:number; groupId:number; sourcePath:string; previewPath:string; status:string }
 export interface BoothRelease { poolIndex:number; sha256:string; path:string }
 export function initializeBooths(store: Store): void {

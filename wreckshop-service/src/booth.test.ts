@@ -9,7 +9,7 @@ import { submitBooth, decideBooth, prepareBooth, liveBooth } from './booth.js';
 import { catalog, publishGroup } from './publish.js';
 import { assetPath } from './url-pool.js';
 
-test('premium DJ booth front: review, 2400 x 400 output, immutable retry, catalog boothPoolIndex, downgrade and suspension', async()=>{
+test('premium DJ booth front: review, 2048 x 341 output (VRChat 2048 limit), immutable retry, catalog boothPoolIndex, downgrade and suspension', async()=>{
   const dir=mkdtempSync(join(tmpdir(),'wreckshop-booth-'));
   const store=new Store(join(dir,'test.sqlite'));
   try {
@@ -25,7 +25,7 @@ test('premium DJ booth front: review, 2400 x 400 output, immutable retry, catalo
     assert.throws(()=>decideBooth(store,id,'reviewer',true),/already reviewed/);
     const result=(await prepareBooth(store,premium.id))!;
     const meta=await sharp(result.bytes).metadata();
-    assert.equal(meta.width,2400); assert.equal(meta.height,400);
+    assert.equal(meta.width,2048); assert.equal(meta.height,341);
     assert.match(result.release.path,/^booths\/g\d{2}-r0[1-8]\.png$/);
     assert.equal(result.release.path,assetPath('booth',result.release.poolIndex));
     assert.deepEqual((await prepareBooth(store,premium.id))!.release,result.release,'retries reuse the reserved URL');
