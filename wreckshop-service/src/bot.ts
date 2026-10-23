@@ -1,0 +1,637 @@
+import { submitBackdrop, decideBackdrop } from './backdrop.js';
+import { groupLinkPrompt, validateGroupName } from './group-link.js';
+import {
+  ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client,
+  GatewayIntentBits, MessageFlags, PermissionFlagsBits, SlashCommandBuilder,
+  type Attachment, type ButtonInteraction, type ChatInputCommandInteraction, type Guild,
+  type ModalSubmitInteraction, type TextChannel
+} from 'discord.js';
+import { createFbt } from './fbt.js';
+import { submitBillboard, decideBillboard } from './billboard.js';
+import { join, resolve } from 'node:path';
+import { Store } from './db.js';
+import { MAX_SOURCE_BYTES, saveSource } from './atlas.js';
+import { LABEL, RETIRED_ACTIONS, createArt, decideArt, kindOfAction } from './fbt-art.js';
+import { publishPerformers } from './performers.js';
+import { heatDue, publishHeat } from './fbt-heat.js';
+import { activateRollback, processOneJob, publishCatalog, type PublishConfig } from './publish.js';
+import { assertSlot, type Group } from './types.js';
+import { acceptsButtonPrefix, databasePath, legacyName, rebrand } from './branding.js';
+import { SLOT_POOL_CAPACITY, poolCapacity } from './url-pool.js';
+import { posterMap, slotInfo } from './slots.js';
+
+const token = process.env.DISCORD_TOKEN;
+const guildId = process.env.DISCORD_GUILD_ID;
+const appId = process.env.DISCORD_APPLICATION_ID;
+if (!token || !guildId || !appId) throw new Error('Set DISCORD_TOKEN, DISCORD_GUILD_ID, and DISCORD_APPLICATION_ID.');
+const dataDir = resolve(process.env.WRECKSHOP_DATA_DIR ?? './data');
+const store = new Store(await databasePath(dataDir));
+const publishConfig: PublishConfig = {
+  token: process.env.GITHUB_TOKEN, owner: process.env.GITHUB_OWNER,
+  repository: process.env.GITHUB_REPOSITORY, branch: process.env.GITHUB_BRANCH ?? 'main',
+  publicBase: process.env.GITHUB_PUBLIC_BASE,
+  defaultsDir: resolve(process.env.WRECKSHOP_DEFAULTS_DIR ?? './defaults'), dataDir,
+  dryRun: process.env.WRECKSHOP_DRY_RUN !== 'false'
+};
+// Welcome messages need the Server Members intent (Discord Developer Portal → Bot → Privileged Gateway Intents).
+const welcome = process.env.FBT_WELCOME !== 'false';
+const client = new Client({ intents: welcome ? [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] : [GatewayIntentBits.Guilds] });
+let publishing = false;
+const ephemeral = MessageFlags.Ephemeral;
+
+const poster = new SlashCommandBuilder().setName('poster').setDescription('Wreckshop posters')
+  .addSubcommand(s => s.setName('submit').setDescription('Submit a poster for review')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addIntegerOption(o => o.setName('slot').setDescription('Poster number: 1–11 entrance & arrival (everyone), 12–32 inside the club (Premium)').setMinValue(1).setMaxValue(32).setRequired(true))
+    .addAttachmentOption(o => o.setName('image').setDescription('Static PNG, JPEG, or WebP').setRequired(true)))
+  .addSubcommand(s => {
+    s.setName('batch').setDescription('Submit up to eight posters for review at once')
+      .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+      .addIntegerOption(o => o.setName('slot1').setDescription('First poster number (see /poster map)').setMinValue(1).setMaxValue(32).setRequired(true))
+      .addAttachmentOption(o => o.setName('image1').setDescription('First poster image').setRequired(true));
+    for (let n = 2; n <= 8; n++) {
+      s.addIntegerOption(o => o.setName(`slot${n}`).setDescription(`Poster ${n} number`).setMinValue(1).setMaxValue(32));
+      s.addAttachmentOption(o => o.setName(`image${n}`).setDescription(`Poster ${n} image`));
+    }
+    return s;
+  })
+  .addSubcommand(s => s.setName('list').setDescription('List group posters')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true)))
+  .addSubcommand(s => s.setName('remove').setDescription('Restore default artwork in a slot')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addIntegerOption(o => o.setName('slot').setDescription('Poster number').setMinValue(1).setMaxValue(32).setRequired(true)))
+  .addSubcommand(s => s.setName('map').setDescription('Where every poster number is in the club, and which tier gets it'));
+const billboard = new SlashCommandBuilder().setName('billboard').setDescription('Premium entrance billboard')
+  .addSubcommand(s=>s.setName('submit').setDescription('Upload a wide 4:1 billboard for review')
+    .addIntegerOption(o=>o.setName('group').setDescription('Premium group ID').setRequired(true))
+    .addAttachmentOption(o=>o.setName('image').setDescription('Static PNG, JPEG or WebP, ideally 2048 x 512').setRequired(true)));
+async function handleBillboard(i:ChatInputCommandInteraction):Promise<void>{
+  const id=i.options.getInteger('group',true);
+  const group=requiredGroup(id);
+  if(!canManage(i,id))throw new Error('You do not represent this group.');
+  if(!group.enabled || group.tier!=='premium' || id===0)throw new Error('Billboards require an enabled premium partner group.');
+  const channel=i.guild!.channels.cache.get(store.setting('approval_channel')??'');
+  if(!channel || channel.type!==ChannelType.GuildText)throw new Error('Approval channel is not configured.');
+  await i.deferReply({flags:ephemeral});
+  const attachment=i.options.getAttachment('image',true);
+  const paths=await saveSource(await downloadAttachment(attachment.url,attachment.size),dataDir);
+  const submission=submitBillboard(store,id,i.user.id,paths.sourcePath,paths.previewPath);
+  const row=new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`ws:bannerapprove:${submission}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`ws:bannerreject:${submission}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
+  await channel.send({content:`Billboard #${submission} for ${group.name}. Wide 4:1 entrance banner.`,files:[new AttachmentBuilder(paths.previewPath)],components:[row]});
+  await i.editReply(`Billboard #${submission} saved for review. Approved artwork appears when your group code is selected in the world.`);
+}
+const backdrop = new SlashCommandBuilder().setName('backdrop').setDescription('Premium photo wall backdrop')
+  .addSubcommand(s=>s.setName('submit').setDescription('Upload a 4:3 photo backdrop for review')
+    .addIntegerOption(o=>o.setName('group').setDescription('Premium group ID').setRequired(true))
+    .addAttachmentOption(o=>o.setName('image').setDescription('Static PNG, JPEG or WebP, ideally 2048 x 1536').setRequired(true)));
+async function handleBackdrop(i:ChatInputCommandInteraction):Promise<void>{
+  const id=i.options.getInteger('group',true);
+  const group=requiredGroup(id);
+  if(!canManage(i,id))throw new Error('You do not represent this group.');
+  if(!group.enabled || group.tier!=='premium' || id===0)throw new Error('Backdrops require an enabled premium partner group.');
+  const channel=i.guild!.channels.cache.get(store.setting('approval_channel')??'');
+  if(!channel || channel.type!==ChannelType.GuildText)throw new Error('Approval channel is not configured.');
+  await i.deferReply({flags:ephemeral});
+  const attachment=i.options.getAttachment('image',true);
+  const paths=await saveSource(await downloadAttachment(attachment.url,attachment.size),dataDir);
+  const submission=submitBackdrop(store,id,i.user.id,paths.sourcePath,paths.previewPath);
+  const row=new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`ws:backdropapprove:${submission}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`ws:backdropreject:${submission}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
+  await channel.send({content:`Backdrop #${submission} for ${group.name}. 4:3 photo wall backdrop.`,files:[new AttachmentBuilder(paths.previewPath)],components:[row]});
+  await i.editReply(`Backdrop #${submission} saved for review. Approved artwork appears when your group code is selected in the world.`);
+}
+const group = new SlashCommandBuilder().setName('group').setDescription('Wreckshop group administration')
+  .addSubcommand(s => s.setName('register').setDescription('Register a partner group')
+    .addStringOption(o => o.setName('name').setDescription('Actual group name, NOT a link or grp_ ID').setRequired(true))
+    .addStringOption(o => o.setName('vrchat_group').setDescription('Required for Premium: your VRChat grp_ UUID or official group page URL'))
+    .addStringOption(o => o.setName('tier').setDescription('Tier').addChoices(
+      { name: 'Standard', value: 'standard' },{ name: 'Premium', value: 'premium' })))
+  .addSubcommand(s => s.setName('representative').setDescription('Add or remove a representative')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addUserOption(o => o.setName('user').setDescription('Discord user').setRequired(true))
+    .addStringOption(o => o.setName('action').setDescription('Action').setRequired(true).addChoices(
+      { name: 'Add', value: 'add' },{ name: 'Remove', value: 'remove' })))
+  .addSubcommand(s => s.setName('tier').setDescription('Assign tier')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addStringOption(o => o.setName('value').setDescription('Tier').setRequired(true).addChoices(
+      { name: 'Standard', value: 'standard' },{ name: 'Premium', value: 'premium' },{ name: 'Headliner', value: 'headliner' })))
+  .addSubcommand(s => s.setName('code').setDescription('Change shareable preset code')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addStringOption(o => o.setName('value').setDescription('Eight digits').setRequired(true)))
+  .addSubcommand(s => s.setName('suspend').setDescription('Enable or suspend a group')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addBooleanOption(o => o.setName('enabled').setDescription('Enabled').setRequired(true)))
+  .addSubcommand(s => s.setName('page').setDescription('Set VRChat group page')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addStringOption(o => o.setName('url').setDescription('VRChat grp_ UUID or group page URL').setRequired(true)))
+  .addSubcommand(s => s.setName('link').setDescription('Configure your in-world Join group button')
+    .addIntegerOption(o => o.setName('group').setDescription('Your Wreckshop group number from /group mine').setRequired(true))
+    .addStringOption(o => o.setName('vrchat_group').setDescription('Your VRChat grp_ UUID or official group page URL').setRequired(true)))
+  .addSubcommand(s => s.setName('accept').setDescription('Acknowledge VRChat rules and hosting responsibilities')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addBooleanOption(o => o.setName('agree').setDescription('I agree to follow VRChat rules').setRequired(true)))
+  .addSubcommand(s => s.setName('recognition').setDescription('Refresh representative names on the entrance board')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true)))
+  .addSubcommand(s => s.setName('rename').setDescription('Change your group name')
+    .addIntegerOption(o => o.setName('group').setDescription('Group number').setRequired(true))
+    .addStringOption(o => o.setName('name').setDescription('New actual group name, NOT a link or grp_ ID').setRequired(true)))
+  .addSubcommand(s => s.setName('delete').setDescription('Remove your group from the active catalog')
+    .addIntegerOption(o => o.setName('group').setDescription('Group number').setRequired(true))
+    .addBooleanOption(o => o.setName('confirm').setDescription('Confirm removing this group').setRequired(true)))
+  .addSubcommand(s => s.setName('mine').setDescription('View your group'));
+const setup = new SlashCommandBuilder().setName('ws-setup').setDescription('Set up Wreckshop channels and panel')
+  .addChannelOption(o => o.setName('submissions').setDescription('Existing public submission channel'))
+  .addChannelOption(o => o.setName('help').setDescription('Existing public help channel'))
+  .addChannelOption(o => o.setName('approvals').setDescription('Existing private approval channel'))
+  .addChannelOption(o => o.setName('logs').setDescription('Existing private log channel'))
+  .addRoleOption(o => o.setName('reviewer_role').setDescription('Role that can review submissions'))
+  .addRoleOption(o => o.setName('admin_role').setDescription('Role that can manage partners'));
+
+const publish = new SlashCommandBuilder().setName('publish').setDescription('Publishing status and recovery')
+  .addSubcommand(s => s.setName('status').setDescription('Show recent publishing jobs'))
+  .addSubcommand(s => s.setName('retry').setDescription('Retry a failed group publication')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true)))
+  .addSubcommand(s => s.setName('rollback').setDescription('Restore an earlier published release')
+    .addIntegerOption(o => o.setName('group').setDescription('Group ID').setRequired(true))
+    .addIntegerOption(o => o.setName('revision').setDescription('Published revision').setRequired(true)));
+const help = new SlashCommandBuilder().setName('ws-help').setDescription('Wreckshop help');
+
+function admin(interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction): boolean {
+  return !!(interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
+    hasMemberRole(interaction,store.setting('admin_role')));
+}
+function reviewer(interaction: ChatInputCommandInteraction | ButtonInteraction): boolean {
+  return admin(interaction) || hasMemberRole(interaction,store.setting('reviewer_role'));
+}
+function hasMemberRole(interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction, roleId: string | undefined): boolean {
+  if (!roleId || !interaction.member) return false;
+  const roles = interaction.member.roles;
+  return Array.isArray(roles) ? roles.includes(roleId) : roles.cache.has(roleId);
+}
+function canManage(interaction: ChatInputCommandInteraction, groupId: number): boolean {
+  return admin(interaction) || store.canRepresent(groupId,interaction.user.id);
+}
+function requiredGroup(id: number): Group {
+  const found = store.group(id);
+  if (!found) throw new Error('Group not found.');
+  return found;
+}
+async function downloadAttachment(url: string, advertisedSize: number): Promise<Buffer> {
+  if (advertisedSize > MAX_SOURCE_BYTES) throw new Error('Attachment exceeds 12 MB.');
+  const response = await fetch(url,{ signal: AbortSignal.timeout(25_000) });
+  if (!response.ok) throw new Error(`Attachment download failed: HTTP ${response.status}`);
+  const length = Number(response.headers.get('content-length'));
+  if (length > MAX_SOURCE_BYTES) throw new Error('Attachment exceeds 12 MB.');
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > MAX_SOURCE_BYTES) throw new Error('Attachment exceeds 12 MB.');
+  return bytes;
+}
+function panelRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('ws:submit').setLabel('Submit Poster').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('ws:mine').setLabel('My Posters').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('ws:groups').setLabel('Group Settings').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('ws:help').setLabel('Help').setStyle(ButtonStyle.Secondary));
+}
+async function auditLog(guild: Guild | null, message: string): Promise<void> {
+  const id = store.setting('log_channel');
+  const channel = id && guild ? guild.channels.cache.get(id) : undefined;
+  if (channel?.type === ChannelType.GuildText)
+    await (channel as TextChannel).send(message).catch(error => console.error('Audit log delivery failed:',error));
+}
+async function configuredChannel(guild: Guild, setting: string, name: string, privateChannel: boolean): Promise<TextChannel> {
+  const saved = store.setting(setting);
+  if (saved) {
+    const old = guild.channels.cache.get(saved);
+    if (old?.type === ChannelType.GuildText) {
+      if (rebrand(old.name) !== old.name) await old.setName(rebrand(old.name),'Wreckshop Worlds rebrand');
+      return old as TextChannel;
+    }
+  }
+  const existing = guild.channels.cache.find(c => c.type === ChannelType.GuildText && (c.name === name || c.name === legacyName(name)));
+  if (existing) {
+    if (existing.name !== name) await existing.setName(name,'Wreckshop Worlds rebrand');
+    store.setSetting(setting,existing.id); return existing as TextChannel;
+  }
+  const channel = await guild.channels.create({ name, type: ChannelType.GuildText,
+    permissionOverwrites: privateChannel ? [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: guild.members.me!.id, allow: [PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages] },
+      ...(store.setting('reviewer_role') ? [{ id: store.setting('reviewer_role')!,
+        allow: [PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages] }] : []),
+      ...(store.setting('admin_role') ? [{ id: store.setting('admin_role')!,
+        allow: [PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages] }] : [])
+    ] : undefined });
+  store.setSetting(setting,channel.id);
+  return channel;
+}
+async function handleSetup(i: ChatInputCommandInteraction): Promise<void> {
+  if (!admin(i)) throw new Error('Manage Server or the configured admin role is required.');
+  const guild = i.guild!;
+  for (const [option,key] of [['submissions','submission_channel'],['help','help_channel'],
+    ['approvals','approval_channel'],['logs','log_channel']] as const) {
+    const chosen = i.options.getChannel(option);
+    if (chosen) {
+      if (chosen.type !== ChannelType.GuildText) throw new Error(`${option} must be a text channel.`);
+      store.setSetting(key,chosen.id);
+    }
+  }
+  const reviewerRole = i.options.getRole('reviewer_role');
+  const adminRole = i.options.getRole('admin_role');
+  if (reviewerRole) store.setSetting('reviewer_role',reviewerRole.id);
+  if (adminRole) store.setSetting('admin_role',adminRole.id);
+  const { submissionChannel, helpChannel } = await ensureGuildSetup(guild);
+  await i.reply({ content: `Setup ready: ${submissionChannel} · help: ${helpChannel}. Existing channels and panel were reused where possible.`, flags: ephemeral });
+  await auditLog(guild,`Setup updated by <@${i.user.id}>.`);
+}
+async function ensureGuildSetup(guild: Guild): Promise<{ submissionChannel: TextChannel; helpChannel: TextChannel }> {
+  await Promise.all([guild.channels.fetch(),guild.roles.fetch(),guild.members.fetchMe()]);
+  for (const [name,key] of [['Wreckshop Reviewer','reviewer_role'],['Wreckshop Admin','admin_role']] as const) {
+    if (!store.setting(key)) {
+      const role = guild.roles.cache.find(r => rebrand(r.name).toLowerCase() === name.toLowerCase());
+      if (role) store.setSetting(key,role.id);
+    }
+  }
+  const submissionChannel = await configuredChannel(guild,'submission_channel','wreckshop-submit',false);
+  const helpChannel = await configuredChannel(guild,'help_channel','wreckshop-help',false);
+  const approvals = await configuredChannel(guild,'approval_channel','wreckshop-approvals',true);
+  const logs = await configuredChannel(guild,'log_channel','wreckshop-log',true);
+  for (const channel of [approvals,logs]) {
+    if (!channel.permissionOverwrites.cache.get(guild.roles.everyone.id)?.deny.has(PermissionFlagsBits.ViewChannel))
+      await channel.permissionOverwrites.edit(guild.roles.everyone,{ ViewChannel: false });
+    const botOverwrite = channel.permissionOverwrites.cache.get(guild.members.me!.id);
+    if (!botOverwrite?.allow.has(PermissionFlagsBits.ViewChannel) ||
+        !botOverwrite.allow.has(PermissionFlagsBits.SendMessages))
+      await channel.permissionOverwrites.edit(guild.members.me!,{ ViewChannel: true, SendMessages: true });
+    for (const key of ['reviewer_role','admin_role']) {
+      const roleId = store.setting(key);
+      const overwrite = roleId ? channel.permissionOverwrites.cache.get(roleId) : undefined;
+      if (roleId && (!overwrite?.allow.has(PermissionFlagsBits.ViewChannel) ||
+          !overwrite.allow.has(PermissionFlagsBits.SendMessages)))
+        await channel.permissionOverwrites.edit(roleId,{ ViewChannel: true, SendMessages: true });
+    }
+  }
+  // The bot needs explicit access even if the server hides these channels from @everyone.
+  for (const channel of [submissionChannel,helpChannel,approvals,logs]) {
+    const needed = [PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.EmbedLinks,PermissionFlagsBits.AttachFiles];
+    if (!needed.every(p=>channel.permissionsFor(guild.members.me!)?.has(p)))
+      await channel.permissionOverwrites.edit(guild.members.me!,{ ViewChannel:true,SendMessages:true,
+        ReadMessageHistory:true,EmbedLinks:true,AttachFiles:true });
+  }
+  const oldPanel = store.setting('panel_message');
+  let message;
+  if (oldPanel) message = await submissionChannel.messages.fetch(oldPanel).catch(() => undefined);
+  const panel = {
+    content: '**Wreckshop Worlds**\nby TwerkTaco & Resolve\nSubmit club posters below, or upload them on **fbtsocial.com → My dashboard → Customize** (easiest: pick a spot on the map). Every club: posters 1–11 (entrance and arrival hall). Premium: all 32. \`/poster map\` shows where each one is. Portrait 2:3, ideally 1024 × 1536. Staff approve every image; see #artwork-guide for sizes and tips.',
+    components: [panelRow()],
+    embeds: [{ color: 0xff0099, thumbnail: { url: 'attachment://wreckshoplogo.png' } }],
+    files: [new AttachmentBuilder(resolve('branding/wreckshoplogo.png'))]
+  };
+  if (message) await message.edit({ ...panel, attachments: [] });
+  else {
+    message = await submissionChannel.send(panel);
+    store.setSetting('panel_message',message.id);
+  }
+  return { submissionChannel, helpChannel };
+}
+async function handlePoster(i: ChatInputCommandInteraction): Promise<void> {
+  const sub = i.options.getSubcommand();
+  if (sub === 'map') { await i.reply({ content: posterMap(process.env.FBT_SITE_URL), flags: ephemeral }); return; }
+  const groupId = i.options.getInteger('group',true);
+  const group = requiredGroup(groupId);
+  if (sub === 'list') {
+    if (!canManage(i,groupId)) throw new Error('You do not represent this group.');
+    const list = store.submissions(groupId).slice(0,20);
+    await i.reply({ content: list.length ? list.map(s => `#${s.id} · poster ${s.slot} (${slotInfo(s.slot)?.where ?? '?'}) · ${s.status}`).join('\n') : 'No submissions yet.', flags: ephemeral });
+    return;
+  }
+  if (!canManage(i,groupId)) throw new Error('You do not represent this group.');
+  if (!group.enabled) throw new Error('Group is suspended.');
+  if (sub === 'remove') {
+    const slot = i.options.getInteger('slot',true);
+    store.removeOverride(groupId,slot);
+    await i.reply({ content: `Slot ${slot} will return to default artwork after publication.`, flags: ephemeral });
+    return;
+  }
+  const requested: { slot: number; attachment: Attachment }[] = [];
+  if (sub === 'submit') requested.push({ slot: i.options.getInteger('slot',true), attachment: i.options.getAttachment('image',true) });
+  else if (sub === 'batch') {
+    for (let n = 1; n <= 8; n++) {
+      const slot = i.options.getInteger(`slot${n}`);
+      const attachment = i.options.getAttachment(`image${n}`);
+      if ((slot === null) !== (attachment === null)) throw new Error(`Poster ${n} needs both a slot and an image.`);
+      if (slot !== null && attachment) requested.push({ slot, attachment });
+    }
+  } else throw new Error('Unknown poster action.');
+  const seen = new Set<number>();
+  for (const item of requested) {
+    assertSlot(group.tier,item.slot);
+    if (seen.has(item.slot)) throw new Error(`Slot ${item.slot} appears more than once.`);
+    if (item.attachment.size > MAX_SOURCE_BYTES) throw new Error(`Slot ${item.slot} attachment exceeds 12 MB.`);
+    seen.add(item.slot);
+  }
+  const channelId = store.setting('approval_channel');
+  const channel = channelId ? i.guild!.channels.cache.get(channelId) : undefined;
+  if (!channel || channel.type !== ChannelType.GuildText) throw new Error('Run /ws-setup to configure the approval channel.');
+  await i.deferReply({ flags: ephemeral });
+  const prepared = [];
+  for (const item of requested) {
+    const bytes = await downloadAttachment(item.attachment.url,item.attachment.size);
+    prepared.push({ slot: item.slot, paths: await saveSource(bytes,dataDir) });
+  }
+  const submitted: number[] = [];
+  let pendingReviewNotice: number | undefined;
+  try {
+    for (const item of prepared) {
+      const submission = store.submit(groupId,item.slot,i.user.id,item.paths.sourcePath,item.paths.previewPath);
+      pendingReviewNotice = submission.id;
+      const prior = submission.previousId ? store.submission(submission.previousId) : undefined;
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`ws:approve:${submission.id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`ws:reject:${submission.id}`).setLabel('Reject').setStyle(ButtonStyle.Danger));
+      const files = [new AttachmentBuilder(item.paths.previewPath,{ name: 'proposed.png' })];
+      if (prior) files.push(new AttachmentBuilder(prior.previewPath,{ name: 'previous.png' }));
+      await (channel as TextChannel).send({ content: `**Poster #${submission.id}** · ${group.name} · slot ${item.slot}\nSubmitted by <@${i.user.id}>. ${prior ? `Previous approved poster: #${prior.id}.` : 'Previous: default artwork.'}`, files, components: [row] });
+      submitted.push(submission.id);
+      pendingReviewNotice = undefined;
+      await auditLog(i.guild,`Poster #${submission.id} submitted by <@${i.user.id}> for ${group.name} slot ${item.slot}.`);
+    }
+  } catch (error) {
+    await i.editReply(`${submitted.length} poster(s) reached review.${pendingReviewNotice ? ` Poster #${pendingReviewNotice} was saved but its review message failed; ask an admin to resolve it.` : ''} Remaining posters were not submitted. Error: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  await i.editReply(submitted.length === 1 ? `Poster #${submitted[0]} is saved and awaiting review.` :
+    `${submitted.length} posters are saved and awaiting individual review: ${submitted.map(id => `#${id}`).join(', ')}.`);
+}
+async function handleGroup(i: ChatInputCommandInteraction): Promise<void> {
+  const sub = i.options.getSubcommand();
+  if (sub === 'mine') {
+    const groups = store.representedGroups(i.user.id);
+    await i.reply({ content: groups.length ? groups.map(g => `#${g.id} ${g.name} · ${g.tier} · code ${g.code}\n${groupLinkPrompt(g)}`).join('\n\n') : 'No assigned groups. Use /group register and provide your VRChat group ID.', flags: ephemeral });
+    return;
+  }
+  if (sub === 'accept') {
+    const groupId = i.options.getInteger('group',true);
+    if (!store.canRepresent(groupId,i.user.id)) throw new Error('Only an assigned representative can accept for this group.');
+    if (!i.options.getBoolean('agree',true)) throw new Error('Acceptance was not recorded.');
+    store.acceptAgreement(groupId,'vrchat-rules-v1',i.user.id);
+    await i.reply({ content: 'Acknowledgment recorded. Follow VRChat rules and use VRChat moderation and reporting tools for issues. This is not age verification.', flags: ephemeral });
+    return;
+  }
+  if (sub === 'register') {
+    if (i.options.getString('tier') === 'premium' && !admin(i)) throw new Error('Premium is assigned by Wreckshop admins. Register a standard group first.');
+    // Registering needs the Verified role from the 18+ verify bot (the bot never verifies anyone itself).
+    if (!admin(i) && !(await fbt.isMemberVerified(i.user.id))) throw new Error('You need the Verified role first. Verify in the verify channel with our 18+ verify bot, then try again.');
+    const name = validateGroupName(i.options.getString('name',true));
+    const vrchatGroup = i.options.getString('vrchat_group') ?? undefined;
+    if (i.options.getString('tier') === 'premium' && !vrchatGroup) throw new Error('Premium groups need their VRChat group ID. Provide vrchat_group:grp_<your-group-UUID>, found in your VRChat group page URL.');
+    await i.deferReply({flags:ephemeral});
+    const group = store.registerGroup(name,
+      i.options.getString('tier') === 'premium' ? 'premium' : 'standard', vrchatGroup,i.user.id);
+    store.setSetting(`representative-name-${i.user.id}`,'@'+i.user.username);
+    store.queuePublish(group.id);
+    await i.editReply({ content: `Your group is #${group.id} ${group.name}. Shareable code: ${group.code}. ${groupLinkPrompt(group)} Use /group rename or /group delete to manage it, and /poster submit or /poster batch for artwork.`, allowedMentions:{parse:[]} });
+    await auditLog(i.guild,`Group #${group.id} ${group.name} registered by <@${i.user.id}> as ${group.tier}.`);
+    return;
+  }
+  const groupId = i.options.getInteger('group',true);
+  requiredGroup(groupId);
+  if (sub === 'page' || sub === 'link' || sub === 'code' || sub === 'recognition' || sub === 'rename' || sub === 'delete') { if (!canManage(i,groupId)) throw new Error('You do not represent this group.'); }
+  else if (!admin(i)) throw new Error('Wreckshop admin access is required.');
+  if(sub==='delete') {
+    if(!i.options.getBoolean('confirm',true)) throw new Error('Group was not deleted. Set confirm:true to remove it.');
+    if(publishing) throw new Error('A publication is in progress. Try deleting again when it finishes.');
+    const name=requiredGroup(groupId).name;
+    store.deleteGroup(groupId);
+    await i.reply({content:`Deleted #${groupId} ${name} from the active groups. Catalog update queued. You can now register another group.`,flags:ephemeral,allowedMentions:{parse:[]}});
+    await auditLog(i.guild,`Group #${groupId} deleted by <@${i.user.id}>.`);
+    return;
+  }
+  if(sub==='rename' || sub==='page' || sub==='link') {
+    await i.deferReply({flags:ephemeral});
+    const value=sub==='rename' ? i.options.getString('name',true) : i.options.getString(sub==='page' ? 'url':'vrchat_group',true);
+    if(sub==='rename') store.renameGroup(groupId,value);
+    else store.setUrl(groupId,value);
+    await i.editReply({content:`Updated #${groupId} ${requiredGroup(groupId).name}. Publication queued.`,allowedMentions:{parse:[]}});
+    await auditLog(i.guild,`Group #${groupId} ${sub} updated by <@${i.user.id}>.`);
+    return;
+  }
+  if (sub === 'representative') {
+    const user = i.options.getUser('user',true);
+    if (i.options.getString('action',true) === 'add') store.addRepresentative(groupId,user.id);
+    else store.removeRepresentative(groupId,user.id);
+  } else if (sub === 'tier') {
+    const value = i.options.getString('value',true);
+    if (value === 'headliner') store.setHeadliner(groupId,true);
+    else { store.setTier(groupId,value as 'standard'|'premium'); store.setHeadliner(groupId,false); }
+  }
+  else if (sub === 'code') store.setCode(groupId,i.options.getString('value',true));
+  else if (sub === 'suspend') store.setEnabled(groupId,i.options.getBoolean('enabled',true));
+  else if (sub === 'page') store.setUrl(groupId,i.options.getString('url',true));
+  else if (sub === 'link') store.setUrl(groupId,i.options.getString('vrchat_group',true));
+  if(sub === 'representative' || sub === 'recognition') {
+    await i.deferReply({flags:ephemeral});
+    store.queuePublish(groupId);
+    await i.editReply(`Updated ${requiredGroup(groupId).name}; entrance recognition refresh queued.`);
+  } else await i.reply({ content: `Updated ${requiredGroup(groupId).name}.${sub === 'page' || sub === 'link' || sub === 'tier' ? ` ${groupLinkPrompt(requiredGroup(groupId))} Publication queued.` : ''}`, flags: ephemeral });
+  await auditLog(i.guild,`Group #${groupId} ${sub} updated by <@${i.user.id}>.`);
+}
+async function handlePublish(i: ChatInputCommandInteraction): Promise<void> {
+  if (!admin(i)) throw new Error('Wreckshop admin access is required.');
+  const sub = i.options.getSubcommand();
+  if (sub === 'status') {
+    const rows = store.db.prepare('SELECT id,group_id,status,attempts,error FROM jobs ORDER BY id DESC LIMIT 12').all() as
+      { id:number; group_id:number; status:string; attempts:number; error:string|null }[];
+    const pools = [...(['atlas','billboard','backdrop','booth'] as const).map(kind => {
+      const used=(store.db.prepare('SELECT COUNT(*) AS n FROM url_reservations WHERE kind=?').get(kind) as {n:number}).n;
+      const capacity=poolCapacity(kind);
+      return `${kind}: ${used}/${capacity} reserved${used>=capacity*.8 ? ' — capacity warning' : ''}`;
+    }), ...(['performer_pool','studio_pool'] as const).map(table => {
+      const used=(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as {n:number}).n;
+      return `${table === 'performer_pool' ? 'performers' : 'studio'}: ${used}/${SLOT_POOL_CAPACITY} slots${used>=SLOT_POOL_CAPACITY*.8 ? ' — capacity warning' : ''}`;
+    })].join(' · ');
+    const jobs=rows.length ? rows.map(r => `#${r.id} group ${r.group_id}: ${r.status} · attempts ${r.attempts}${r.error ? ` · ${r.error.slice(0,100)}` : ''}`).join('\n') : 'No jobs.';
+    await i.reply({ content: `${pools}\n${jobs}`.slice(0,2000), flags: ephemeral });
+    return;
+  }
+  const groupId = i.options.getInteger('group',true);
+  requiredGroup(groupId);
+  if (sub === 'retry') {
+    store.queuePublish(groupId);
+    await i.reply({ content: `Queued group ${groupId}.`, flags: ephemeral });
+  } else {
+    const revision = i.options.getInteger('revision',true);
+    await i.deferReply({ flags: ephemeral });
+    const message = await activateRollback(store,groupId,revision,publishConfig);
+    await i.editReply(message);
+  }
+}
+async function handleButton(i: ButtonInteraction): Promise<void> {
+  const [prefix, action, rawId] = i.customId.split(':');
+  if (!acceptsButtonPrefix(prefix)) return;
+  if (action === 'help' || action === 'submit') {
+    await i.reply({ content: action === 'submit' ? 'Use `/poster submit` for one image or `/poster batch` for up to eight. Choose a group and slot for each image. Register your group with `/group register`; you become its representative.' :
+      'Wreckshop Worlds: every group may use posters 1–11 (entrance and arrival hall); Premium and Headliner groups may use 1–32. `/poster map` shows where each number is. Use `/group mine`, `/poster list`, `/poster submit`, or `/poster batch`.', flags: ephemeral });
+    return;
+  }
+  if (action === 'groups' || action === 'mine') {
+    const groups = store.representedGroups(i.user.id);
+    const lines = groups.flatMap(g => action === 'groups' ? [`#${g.id} ${g.name} · ${g.tier} · code ${g.code}\n${groupLinkPrompt(g)}`] :
+      store.submissions(g.id).filter(s => s.submitterId === i.user.id).slice(0,8).map(s => `${g.name} #${s.id} slot ${s.slot}: ${s.status}`));
+    await i.reply({ content: lines.length ? lines.join('\n') : 'Nothing to show yet.', flags: ephemeral });
+    return;
+  }
+  if (action === 'backdropapprove' || action === 'backdropreject') {
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    decideBackdrop(store,Number(rawId),i.user.id,action === 'backdropapprove');
+    await i.update({ content: `${i.message.content}\n${action === 'backdropapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] });
+    await fbt.artDecided('backdrop',Number(rawId),action === 'backdropapprove').catch(() => undefined); return;
+  }
+  if (action === 'bannerapprove' || action === 'bannerreject') {
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    decideBillboard(store,Number(rawId),i.user.id,action === 'bannerapprove');
+    await i.update({ content: `${i.message.content}\n${action === 'bannerapprove' ? 'APPROVED' : 'REJECTED'}`, components: [] });
+    await fbt.artDecided('billboard',Number(rawId),action === 'bannerapprove').catch(() => undefined); return;
+  }
+  if (RETIRED_ACTIONS.has(action ?? '')) {
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    await i.update({ content: `${i.message.content}\nDancer lockers were retired; nothing to decide.`, components: [] });
+    return;
+  }
+  const generic = kindOfAction(action ?? '');
+  if (generic && !['poster','billboard','backdrop'].includes(generic.kind)) {
+    // DJ booth fronts, Venue Studio textures and performers' pole / chair / deck art.
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    const { kind, approve } = generic;
+    decideArt(store,kind,Number(rawId),i.user.id,approve);
+    await i.update({ content: `${i.message.content}\n**${approve ? 'APPROVED' : 'REJECTED'}** by <@${i.user.id}>`, components: [] });
+    await auditLog(i.guild,`${LABEL[kind]} #${rawId} ${approve ? 'approved' : 'rejected'} by <@${i.user.id}>.`);
+    await fbt.artDecided(kind,Number(rawId),approve).catch(() => undefined); return;
+  }
+  if (action === 'approve' || action === 'reject') {
+    if (!reviewer(i)) throw new Error('Reviewer access is required.');
+    const id = Number(rawId);
+    if (!Number.isSafeInteger(id)) throw new Error('Invalid submission.');
+    const result = store.decide(id,i.user.id,action === 'approve');
+    await i.update({ content: `${i.message.content}\n**${result.status.toUpperCase()}** by <@${i.user.id}>`, components: [] });
+    await auditLog(i.guild,`Poster #${id} ${result.status} by <@${i.user.id}>.`);
+    await fbt.artDecided('poster',id,action === 'approve').catch(() => undefined);
+    return;
+  }
+}
+const art = createArt({ store, dataDir, client, guildId, auditLog });
+const fbtSite = { url: process.env.FBT_SITE_URL, secret: process.env.FBT_BOT_SECRET };
+const fbt = createFbt({
+  client, store, guildId, art,
+  site: fbtSite, dancerRoleId: process.env.FBT_DANCER_ROLE_ID, djRoleId: process.env.FBT_DJ_ROLE_ID, producerRoleId: process.env.FBT_PRODUCER_ROLE_ID, codeGate: process.env.FBT_CODE_GATE === 'on',
+  publicUrl: process.env.FBT_PUBLIC_URL ?? process.env.FBT_SITE_URL ?? 'https://dsc.gg/wreckshop',
+  welcome, isAdmin: admin, auditLog,
+});
+for (const ev of ['channelCreate', 'channelDelete', 'channelUpdate'] as const) client.on(ev, () => fbt.scheduleChannels());
+client.on('guildMemberAdd', member => { void fbt.onMemberAdd(member).catch(error => console.error('Welcome failed:',error)); });
+client.on('interactionCreate', async interaction => {
+  try {
+    if (interaction.isAutocomplete()) { await fbt.handleAutocomplete(interaction).catch(() => undefined); return; }
+    if (interaction.isModalSubmit()) { await fbt.handleModal(interaction); return; }
+    if (interaction.isButton()) {
+      if (!(await fbt.handleButton(interaction))) { await handleButton(interaction); fbt.scheduleSync(); }
+      return;
+    }
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.guildId !== guildId) throw new Error('Use this in the configured server.');
+    if (await fbt.handleCommand(interaction)) return;
+    if (interaction.commandName === 'ws-setup') await handleSetup(interaction);
+    else if (interaction.commandName === 'backdrop') await handleBackdrop(interaction);
+    else if (interaction.commandName === 'billboard') await handleBillboard(interaction);
+    else if (interaction.commandName === 'poster') await handlePoster(interaction);
+    else if (interaction.commandName === 'group') { await handleGroup(interaction); fbt.scheduleSync(); }
+    else if (interaction.commandName === 'publish') await handlePublish(interaction);
+    else if (interaction.commandName === 'ws-help') await interaction.reply({ content:
+      'New here? Run `/start` for the step-by-step: register, get verified, host a night, collab, and apply for Premium or Headliner. Advertise your group for free. Easiest way to manage your club: sign in at fbtsocial.com and open **My dashboard** (top right) to upload art, post nights and invite your team. Join the Wreckshop Worlds Discord to submit your posters. Use `/group mine`, `/poster submit`, or `/poster batch` for up to eight images. Anyone can use `/group register` to register a standard group and upload posters. Premium partners can use `/billboard submit` and `/backdrop submit group:<id> image:<upload>` for the photo wall. Posters are numbered in walking order: 1–6 entrance and sidewalk, 7–11 arrival hall and club doorway (every group), then 12–32 inside the club (Premium & Headliner): the main dance floor is 12–16, 22 and 27, the balconies and upper walkway the rest. `/poster map` lists every spot; fbtsocial.com/help#posters has floor plans and a photo of each. Repeat batches as needed. Posters: portrait 2:3, recommended 1024 x 1536. Billboard: 2048 x 512. Photo backdrop: 2048 x 1536. Static PNG/JPEG/WebP, up to 12 MB and 30 MP, dimensions 256–8192 px. Follow VRChat rules and use its reporting tools for issues.', flags: ephemeral });
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error).slice(0,1500);
+    if (interaction.isRepliable()) {
+      if (interaction.deferred && !interaction.replied) await interaction.editReply({ content: message, allowedMentions:{parse:[]} }).catch(() => undefined);
+      else if (interaction.replied) await interaction.followUp({ content: message, flags: ephemeral,allowedMentions:{parse:[]} }).catch(() => undefined);
+      else await interaction.reply({ content: message, flags: ephemeral }).catch(() => undefined);
+    }
+  }
+});
+client.once('ready', async () => {
+  if (process.env.WRECKSHOP_SEED_SHXTTY === 'true') {
+    let pilot = store.groups().find(g => g.name.toUpperCase() === 'SHXTTY');
+    if (!pilot) {
+      pilot = store.registerGroup('SHXTTY','premium');
+      store.queuePublish(pilot.id);
+      console.log(`SHXTTY pilot registered as group ${pilot.id}.`);
+    } else console.log(`SHXTTY pilot already registered as group ${pilot.id}.`);
+  }
+  const guild = await client.guilds.fetch(guildId);
+  if(store.setting('recognition-privacy-v2')!=='applied'){store.queuePublish(0);store.setSetting('recognition-privacy-v2','applied');}
+  await guild.commands.set([poster,group,setup,publish,help,billboard,backdrop,...fbt.commands]);
+  if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
+    try { await ensureGuildSetup(guild); console.log('Wreckshop channels and panel ready.'); }
+    catch (error) { console.error('Automatic channel setup failed:',error); }
+  }
+  if (!publishConfig.dryRun && !store.activeRelease(0)) store.queuePublish(0);
+  // performers.json should exist (even empty) so the world's URL never 404s; published once on the first start.
+  if (!store.setting('performers-roster')) store.setSetting('performers-dirty','1');
+  store.db.prepare("UPDATE jobs SET status='queued' WHERE status='publishing'").run();
+  // One-time recovery of the most recent job affected by the Pages outage.
+  if (!publishConfig.dryRun && !store.setting('pages-recovery-20261005')) {
+    const failed = store.db.prepare(`SELECT group_id AS groupId FROM jobs j
+      WHERE id=(SELECT MAX(id) FROM jobs WHERE group_id=j.group_id)
+      AND (status='publishing' OR (status='failed' AND error LIKE '%Public asset did not match%'))`)
+      .all() as { groupId: number }[];
+    for (const row of failed) store.queuePublish(row.groupId);
+    store.setSetting('pages-recovery-20261005','queued');
+    console.log(`Queued ${failed.length} interrupted public-data publications for recovery.`);
+  }
+  // One-time: billboards, backdrops and booth fronts now stretch to fill their frame (like posters) instead of
+  // being letterboxed. Re-publish every enabled Premium group once so their live art is re-cut.
+  if (!publishConfig.dryRun && !store.setting('world-art-fill-20261017')) {
+    const premium = store.groups().filter(g => g.enabled && g.tier === 'premium');
+    for (const g of premium) store.queuePublish(g.id);
+    store.setSetting('world-art-fill-20261017','queued');
+    console.log(`Queued ${premium.length} Premium groups to re-cut their world art (stretch to fill).`);
+  }
+  if (process.env.WRECKSHOP_AUTO_SETUP === 'true') {
+    try { await fbt.onReady(guild); console.log('FBT Social start-here and events channels ready.'); }
+    catch (error) { console.error('FBT Social setup failed:',error); }
+  }
+  fbt.startLoops();
+  console.log('Wreckshop Worlds service ready.');
+  setInterval(async () => {
+    if (publishing) return;
+    publishing = true;
+    try {
+      const result = await processOneJob(store,publishConfig);
+      if (result) { console.log(result); await auditLog(client.guilds.cache.get(guildId) ?? null,result); }
+      else if (store.setting('catalog-dirty') === '1') {
+        // A full publish also writes the catalog, so a look change only needs this when nothing else ran.
+        store.setSetting('catalog-dirty','0');
+        const looks = await publishCatalog(store,publishConfig).catch(error => { store.setSetting('catalog-dirty','1'); throw error; });
+        if (looks) console.log(looks);
+      }
+      else if (store.setting('performers-dirty') === '1') {
+        // Performers belong to people, not groups: their atlases and performers.json publish on their own, after group jobs.
+        store.setSetting('performers-dirty','0');
+        const performers = await publishPerformers(store,publishConfig).catch(error => { store.setSetting('performers-dirty','1'); throw error; });
+        if (performers) { console.log(performers); await auditLog(client.guilds.cache.get(guildId) ?? null,performers); }
+      }
+      else if (heatDue(store)) {
+        // The entrance heat board: checked hourly, committed only when it changed.
+        store.setSetting('heat-checked-at',String(Date.now()));
+        const heat = await publishHeat(store,publishConfig,fbtSite);
+        if (heat) console.log(heat);
+      }
+    } catch (error) { console.error('Publishing job failed:', error); }
+    finally { publishing = false; }
+  },30_000);
+});
+await client.login(token);
+

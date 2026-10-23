@@ -1,0 +1,108 @@
+# Wreckshop Worlds service
+
+## World update: performers, Venue Studio, DJ booth fronts, heat board (12 October 2026)
+
+Needs the matching world update; older worlds ignore the new files and catalog fields.
+
+- **Performers (verified dancers):** the website verifies a dancer (VRChat profile URL → `usr_` id, a one-time code in their VRChat bio, and VRChat's 18+ age verification, read once by the website's VRChat poller) and sends `performer.verified` `{user, vrcId, name}` through the outbox. The bot keeps the roster keyed by VRChat user id, gives the **dancer role** (`FBT_DANCER_ROLE_ID`, else setting `fbt_dancer_role`, else a role named `Dancer`/`Dancers`/`FBT Dancer`; it must sit below the bot's role) and sends a welcome DM. `performer.renamed` `{vrcId, name}` keeps the display name current (the world matches performers by it); `performer.removed` `{vrcId, by}` takes them off the roster, removes the role and frees their slot.
+- **Performer stage art:** pole wrap, chair seat-back and deck logo, uploaded on the website (My dashboard) and reviewed with the usual Discord card (`ws:poleapprove`, `ws:chairapprove`, `ws:deckapprove` and their `…reject`) or on the website. Each performer with approved art gets one **1024 × 1024** atlas in the pre-authored slot pool `performers/g{i/8:00}-r{i%8+1:00}.png` (64 slots, i = 0..63): left half x 0–511 = pole wrap (cover), top right = chair (cover), bottom right = deck logo (fitted whole on black); a missing kind is transparent black. A performer keeps the same slot for good (re-uploads overwrite it in place); removal frees it. Then `performers.json` at the Pages root: `{"version":1,"updated":"<ISO>","performers":[{"vrcId":"usr_…","name":"<VRChat display name>","pool":0,"pole":true,"chair":false,"deck":true}]}` (performers with at least one approved piece). Published on its own after group jobs (`performers-dirty`), only when something other than the timestamp changed; commit messages carry slot numbers only. `performer.art.remove` `{user, kind}` takes one piece down.
+- **Venue Studio (Premium/Headliner):** the website saves a theme and sends `studio.set` `{groupId, theme}` (`theme` null clears it). Textures are reviewed like the billboard (`ws:studioapprove` / `ws:studioreject`), rendered at **1024 × 1024** (opaque, palette PNG) and published to the slot pool `studio/gNN-rNN.png` (64 slots; one per group, reclaimed from groups that lost Premium when all are taken). Catalog groups that are enabled Premium/Headliner with a saved theme get `"studio": {"accent":"#rrggbb","glow":"#rrggbb","finish":"walnut|marble|velvet|bronze|charcoal","texturePool":<0..63 or -1>}`, and the studio accent and glow level also feed the existing `accent` / `glow` fields.
+- **DJ booth fronts (Premium):** uploaded on the website (Customize), reviewed with the same Discord card buttons (`ws:boothapprove` / `ws:boothreject`) or on the website. Approved art is fitted into a **2400 × 400** PNG and published to the `booths/` pool (`booths/gNN-rNN.png`, 256 URLs, `WRECKSHOP_BOOTH_POOL_CAPACITY`). Every catalog group has `boothPoolIndex` (-1 when none, suspended or not premium).
+- **Headliner flag:** every catalog group has `headliner` (true only for premium groups with `level='headliner'`); `tier` stays `premium`.
+- **Dancer lockers are retired** (dropped by the owner before launch). Nothing publishes `lockers/` any more; any queued `locker.*` outbox items are dropped, a `locker` upload is reported back as failed, and old locker review buttons just say so. Old tables and reservations are left alone and never read.
+- **Heat board:** every `FBT_HEAT_INTERVAL_MINUTES` (default 60) the bot asks the website for `/api/bot/heat`, re-checks it (positive momentum words only, no ranks, at most 40 clubs) and publishes `heat.json` at the Pages root when anything but the timestamp changed. `supporters.vip` is always empty until the owner decides where VIP names come from.
+- `/publish status` also shows the performer and studio slot counts.
+
+## FBT Social website link (11 October 2026)
+
+The bot is the Discord front door for the FBT Social website (`fbt-social-web` on Railway).
+
+- **Welcome:** new members get a short welcome in the server's system channel (or `#start-here`) and a DM with the Start Here guide. Needs **Server Members Intent** in the Discord Developer Portal; set `FBT_WELCOME=false` to switch it off.
+- **`#start-here`:** read-only channel with a permanent panel: Register my group (a form, no command needed), Get verified, Apply for Premium/Headliner, Host a night, Start a collab, Posters, and a link to the Strip. `/start` shows the same panel privately.
+- **Verified is automatic:** VRChat group linked plus hosting rules accepted (`/group accept` or the panel's button). No staff step.
+- **Premium/Headliner applications:** `/apply` or the panel opens a short form. Staff get a card in the approvals channel with the group's season heat, nights hosted, best night, events and collabs, plus Approve/Decline buttons (admins only). Approving sets the tier here and the bot DMs the applicant. Headliner is stored as `level='headliner'` on a premium group; the world catalog still says `premium`, so no world update is needed.
+- **Events:** `/event create|list|cancel` (or the website). Events are announced in `#fbt-events` and, if the bot has Manage Events, created as Discord scheduled events.
+- **Collabs:** `/collab start|list` (or the website). Partner representatives get a DM with Accept/Decline. Both groups must agree; it can be logged up to 24 hours after the night.
+- **Sync:** the bot pushes its groups to the website every 3 minutes and after every group change, polls the website's outbox every 8 seconds, and asks the website to recompute heat every 10 minutes.
+- Variables: `FBT_SITE_URL`, `FBT_PUBLIC_URL`, `FBT_BOT_SECRET` (same value as on the website), `FBT_WELCOME`.
+
+
+## Publishing recovery (7 October 2026)
+
+Pages deployments use a unique artifact name for each run attempt and retry failed deployment steps twice with backoff. If an asset or catalog is already committed but is missing or stale on Pages, the publisher commits a hidden `.pages-recovery.json` marker to trigger a fresh deployment before verifying the public bytes again. Already-live identical files do not trigger builds. This uses the existing Contents permission; no additional token permissions are needed.
+
+Transient publication failures automatically retry after a two-minute cooldown, up to three total attempts. Fresh queued approvals take priority, and superseded jobs, deleted groups, permission errors and capacity errors are not automatically retried. Approval records remain intact. After the retry budget is exhausted, investigate `/publish status` and use `/publish retry` for a new attempt.
+
+## Group management (6 October 2026)
+
+Each Discord user may represent only one group, including admins acting as representatives. Administrative access still lets admins manage all groups. Registration repeats return the existing group, and a VRChat group ID cannot be registered twice. `/group rename group:<number> name:<actual group name>` changes a represented group; `/group delete group:<number> confirm:true` removes it from the catalog and releases its Discord assignments. Admins may also use these controls. Linking is available to standard groups for identity configuration; the in-world Join Group button remains Premium-only.
+
+On startup, duplicate VRChat identities, or duplicate names with the same representative and no conflicting VRChat IDs, are archived automatically. Empty unrepresented seed entries also yield to a matching real group. Prefer Premium, then more assigned artwork, then linked/represented entries, then oldest ID. Distinct represented groups with matching names are retained. Discord users with multiple distinct legacy assignments retain the oldest assignment; the groups themselves remain. Archived entries retain artwork, approval history, codes and immutable URL slots for recovery. Their codes no longer activate groups. Delete does not reclaim the finite preauthored atlas URL capacity: overwriting published immutable URLs would break cached world artwork. The first migration makes a consistent SQLite snapshot alongside the database before cleanup; duplicate mappings are recorded in settings.
+
+The owner selected manual group names instead of authenticated VRChat name lookup. `name` requires the actual group name and rejects pasted URLs and grp_ IDs with instructions. Put an optional official VRChat URL or ID in `vrchat_group` when registering, or use `/group link` afterward. Linking never overwrites the name. Use `/group rename` to correct existing URL-named entries. No VRChat account/session or automatic API lookup is required.
+
+The dancer whitelist and dancer self-claim feature were deferred by the owner and are not included in this change.
+
+One Discord bot process holds the SQLite database and publishes 2048 × 2048 poster atlases. The bot is for Wreckshop Worlds by TwerkTaco & Resolve; SHXTTY is one possible premium partner. Standard groups can replace slots 1–8, premium groups 1–32. Unassigned slots use the 32 bundled default artworks. Slots 17–32 use a second atlas and require the updated world. See ARTWORK_GUIDE.txt for submission sizes and commands. Codes are public preset selectors and never confer in-world roles.
+
+## Local dry run
+
+Use Node.js 22 or later. In this directory run `npm ci`, `npm run build`, `npm test`, and `npm run dry-run`. Inspect `data/dry-run/group-0-atlas.png` and `data/dry-run/catalog.json`. Dry run does not contact GitHub or Discord. The source defaults are in `defaults/`; edit these files only with approval from the world owner.
+
+## Discord account setup
+
+1. Create a Discord application and bot, then invite it to the intended server with scopes `bot` and `applications.commands`. Grant View Channels, Send Messages, Attach Files, Read Message History, and Manage Channels if the bot should create its own channels. The bot uses the Guilds intent only. It does not need Message Content or Guild Members privileged intents.
+2. Copy `.env.example` into your host's private environment settings. Set `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, and `DISCORD_GUILD_ID`. Never paste the token into Discord, Unity, GitHub, or a screenshot.
+3. Start `node dist/bot.js`. A server administrator runs `/ws-setup` to select existing channels or create `wreckshop-submit`, `wreckshop-help`, `wreckshop-approvals`, and `wreckshop-log`. Select reviewer and administrator roles. The approval and log channels are made private. Repeating setup updates the same persistent panel when available.
+4. Anyone in the configured Discord can use `/group register name:...` to create a standard group and automatically become its representative. Representatives can submit posters and set `/group code` and `/group page`. Only admins assign premium with `/group tier` or manage suspension and additional representatives. `/group accept` is an optional VRChat rules acknowledgment, never a submission gate or age-verification check.
+5. Representatives use `/poster submit` for one image or `/poster batch` for up to eight images, each with its own slot. Each image must be a static JPEG, PNG, or WebP (maximum 12 MB and 30 megapixels). The bot saves attachments on its volume and creates a separate review item for every poster. Reviewers use the buttons in the private approval channel. Approved work enters the publishing queue. `/poster list`, `/poster remove`, `/group mine`, `/publish status`, `/publish retry`, and `/publish rollback` handle day-to-day operation.
+
+6. Premium representatives use `/billboard submit group:ID image:...` for a wide 4:1 banner (ideally 2048 x 512). It uses the existing review channel. After approval and publication, selecting that group code displays the banner above the entrance and a **Join [group name]** button above **I agree**. Set the group page with `/group page` to enable that button. Standard groups retain free poster uploads. The button opens VRChat's group page; it does not automatically join or require membership.
+
+Billboards have a separate immutable pool of eight images per group, with retries reusing the same reserved image URL. Downgraded or suspended groups do not display a banner. Registration has no fixed group-count cap. Artwork uses shared immutable URL pools; see the capacity section below.
+
+## GitHub Pages asset feed
+
+Create or use a dedicated public repository for the feed. Enable Pages from its branch root. Create a fine-grained GitHub personal access token limited to that repository with **Contents: Read and write**. Set `GITHUB_OWNER`, `GITHUB_REPOSITORY`, `GITHUB_BRANCH`, `GITHUB_PUBLIC_BASE` (the exact `https://NAME.github.io/REPO` Pages base), and `GITHUB_TOKEN` in the host settings. Change `WRECKSHOP_DRY_RUN=false` only after a dry run and repository setup. The publisher uploads an immutable numbered atlas, verifies its public bytes, then uploads the catalog and verifies it. A failure leaves the earlier active catalog in place where possible. Keep this delivery URL replaceable: GitHub Pages' terms restrict online business and SaaS uses, so reconsider hosting before paid partner commerce.
+
+The world scene currently authors `https://mrgandyy.github.io/VRChatPosters-data/catalog.json` and 256 immutable atlas URLs at that base. After configuring live publishing, an administrator runs `/publish retry group:0` to publish the default atlas and catalog first, then verifies those two public URLs before registering partner groups. If the actual repository or domain differs, change `PublicBase` in `Assets/Wreckshop/Editor/WreckshopSceneIntegration.cs`, update the scene's controller URLs in the Unity Inspector or a controlled editor migration, then reupload the world. Changing a code, artwork, tier, or group name within the authored pool does not require a world reupload. Registration is independent of artwork URL slots. Poster pairs with identical content share a URL index across groups, while changed content reserves a fresh index before uploading. Each media pool currently has 256 URLs shared across all groups and revisions; there is no eight-revisions-per-group ceiling. Existing URLs, archived history, and possibly uploaded legacy attempts stay reserved. Expanding the shared pool or changing its base requires a world reupload.
+
+## Low-cost host
+
+One Railway service with a persistent volume is the simple initial deployment. Railway Hobby currently has a $5/month minimum that includes $5 of usage; CPU, memory, network, and volume usage beyond included credit are billed separately. Treat $5 as the minimum, not a guaranteed total. The free tier has tighter credit and storage and is a poor uptime choice for a review bot. Build with `npm ci && npm run build`; start with `npm start`. Mount a persistent volume and set `WRECKSHOP_DATA_DIR` to its mounted path. Keep `WRECKSHOP_DEFAULTS_DIR` pointing at the shipped `defaults` directory. Run one replica only because SQLite and the publisher are single-process. Give Sharp enough memory for a 2048-square atlas and source decode; inspect host usage after real submissions. Do not enable a paid plan until approved by the account owner.
+
+The deployed project is `wreckshop-worlds` in Railway, with service `wreckshop-bot` sourced from the `main` branch of `mrgandyy/VRChatPosters-data`. Its root directory is `/wreckshop-service`, its build command is `npm run build`, and its start command is `npm start`. The persistent volume is mounted at `/app/data`; production sets `WRECKSHOP_DATA_DIR=/app/data`, `WRECKSHOP_DRY_RUN=false`, and `WRECKSHOP_AUTO_SETUP=true`. On startup the bot reuses or creates the four named channels, matches the `Wreckshop Admin` and `Wreckshop Reviewer` roles by name, restores the submission panel, and queues the default atlas only if it has no live release. Railway has no GitHub deployment trigger for this service, so publishing catalog and atlas commits will not restart the bot. After changing service code, run `railway service redeploy --from-source --yes` from a linked Railway CLI directory or redeploy from the Railway dashboard.
+
+## Backup and recovery
+
+Back up the entire persistent data directory, including SQLite database, WAL files if present, saved sources and previews, and dry-run output, with the bot stopped or using SQLite's backup API for a hot snapshot. Keep versioned off-host backups and periodically test restoration. GitHub holds published atlases and catalog but is not a substitute for source/approval records. On restart, interrupted publishing jobs become retryable. Use `/publish status` and `/publish retry` after investigating a failure. `/publish rollback` points the public catalog to an earlier release only after checking that atlas still exists; it does not erase newer revisions. Keep the previous catalog commit for a manual emergency rollback.
+
+## Operational limits
+
+VRChat Udon image and string downloads are rate limited and subject to client caching. The world refreshes periodically or on staff request, so publication is not instantaneous. Each client keeps its last valid downloaded atlas when a replacement fails. The catalog and all codes are public. Staff/Dancer/VIP permissions remain in TTSS, separate from Discord representatives and group selection. Live two-client, Group-instance, PC, Quest, and headset tests remain necessary before release.
+
+## Wreckshop Worlds rename
+
+The first startup migrates the legacy SQLite file with SQLite's online backup API, including committed WAL records, into `wreckshop.sqlite`. It retains the original file for recovery and never overwrites an existing new database. Only the built-in default group's old name changes; partner IDs, codes, representatives, approvals, releases, channel IDs, and role IDs are preserved. Old pending review buttons remain usable. Compatibility strings are isolated in `src/branding.ts`; historical backups retain their original names. The new public commands are `/ws-setup` and `/ws-help`.
+# Premium FBT Social photo backdrop
+
+`/backdrop submit group:<group-id> image:<attachment>` submits a photo-wall background independently of the entrance billboard. The caller must represent the enabled premium group (or have the existing administrator permission). Existing reviewers approve or reject the submission in the configured approval channel. Accepted images are fitted into a 2048 × 1536 PNG; the existing upload validation applies.
+
+Approved artwork is published under the independent `backdrops/` URL pool and selected through `backdropPoolIndex` in the catalog. The Unity photo wall retains its default FBT artwork while loading, after a failed image request, and whenever there is no eligible premium group. Each group has eight immutable backdrop revisions, matching the preauthored Unity URL pool. Repeated publication of identical artwork reuses the same revision.
+
+Build with `npm run build` and run `npm test`. Restart the deployed bot with its existing configuration to register the new slash command. Updating this repository alone does not restart the deployed service or publish a new VRChat world.
+
+
+## Premium Join group destination
+
+Join group is Premium-only. `/group register name:<name> tier:premium vrchat_group:<grp_UUID-or-official-URL>` requires the partner's VRChat group ID; Standard registration does not require it. IDs are accepted in `grp_` UUID form or as an official `https://vrchat.com/home/group/` URL and stored canonically. Format validation does not verify ownership of the external VRChat group.
+
+Existing Premium representatives use `/group link group:<Wreckshop-number> vrchat_group:<grp_UUID-or-official-URL>`. The legacy `/group page group:<number> url:<ID-or-URL>` remains available for Premium groups. These commands use the existing representative/admin permission check and queue publication. `/group mine` and the panel's groups action show the configured destination, or ask Premium representatives to supply their missing ID. A Premium tier change also displays this setup prompt when needed.
+
+The world opens the active Premium group's VRChat page. The button remains hidden without a configured link and for Standard groups. No example ID is assigned automatically, and opening the page does not automatically join a player to a group.
+
+## Shared artwork capacity (7 October 2026)
+
+The startup migration takes a SQLite snapshot and preserves existing group IDs, codes and releases. It protects every legacy atlas revision plus the next potentially attempted revision, and all reserved billboard/backdrop history. Reservations are never recycled. Identical paired poster hashes share an index, so default-only registrations do not each consume a URL. `/publish status` shows reserved counts and warns at 80 percent. This is not unlimited artwork storage.
+
+`WRECKSHOP_URL_POOL_CAPACITY` defaults to 256 for the currently published world. The editor command **FBT Social > Artwork > Expand URL pools to 8192** backs up the active scene, validates all old URLs, extends both poster sheets, billboards and backdrops, syncs Udon data and saves. Upload the expanded scene for **both PC and Quest**, validate group activation and artwork on both platforms, and restart old instances before setting the service variable to `8192`. Never raise the backend pool while old world builds are still serving users. Do not roll back to a pre-shared-pool bot after new reservations have been used: its legacy allocator could overwrite shared URLs.

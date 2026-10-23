@@ -1,0 +1,268 @@
+import { parseLocked } from './verify-gate.js';
+import { liveBackdrop, prepareBackdrop, type BackdropRelease } from './backdrop.js';
+import { liveBillboard, prepareBillboard, type BannerRelease } from './billboard.js';
+import { liveBooth, prepareBooth, type BoothRelease } from './booth.js';
+import { liveStudio, prepareStudioTexture, studioEntry, studioTheme, venueEntry, type StudioRelease } from './studio.js';
+import { createHash } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { buildAtlas } from './atlas.js';
+import type { Store } from './db.js';
+import type { Group } from './types.js';
+import { assetPath, reserveUrl } from './url-pool.js';
+
+export const RELEASES_PER_GROUP = 8;
+export const GROUP_CAPACITY = 32;
+export interface PublishConfig {
+  token?: string;
+  owner?: string;
+  repository?: string;
+  branch: string;
+  publicBase?: string;
+  defaultsDir: string;
+  dataDir: string;
+  dryRun: boolean;
+}
+export interface ReleaseRef { groupId: number; revision: number; poolIndex: number; sha256: string; publicUrl: string; sha256B?: string; publicUrlB?: string }
+export function sheetBRelease(store: Store, groupId: number, revision: number): {sha256B:string;publicUrlB:string} | undefined {
+  const value = store.setting(`poster-sheet-b-${groupId}-${revision}`);
+  return value ? JSON.parse(value) as {sha256B:string;publicUrlB:string} : undefined;
+}
+const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+
+export function poolIndex(group: Group, revision: number): number {
+  if (group.atlasSlot < 0 || group.atlasSlot >= GROUP_CAPACITY ||
+      revision < 1 || revision > RELEASES_PER_GROUP)
+    throw new Error('Authored atlas URL capacity exhausted; extend and reupload the world.');
+  return group.atlasSlot * RELEASES_PER_GROUP + revision - 1;
+}
+/**
+ * Brand look from the website: accent '#rrggbb' ('' = club default) and glow 0 soft, 1 standard, 2 bright.
+ * A Premium group's saved Venue Studio theme feeds the same two fields, so worlds that only read
+ * accent/glow still pick up the studio colour and glow level.
+ */
+export function lookOf(store: Store, groupId: number): { accent: string; glow: number } {
+  const group = store.group(groupId);
+  const studio = group?.enabled && group.tier === 'premium' ? studioTheme(store, groupId) : undefined;
+  if (studio) return { accent: studio.accent, glow: studio.glowLevel };
+  try {
+    const v = JSON.parse(store.setting(`look-${groupId}`) ?? '{}') as { accent?: unknown; glow?: unknown };
+    const accent = typeof v.accent === 'string' && /^#[0-9a-f]{6}$/.test(v.accent) ? v.accent : '';
+    const glow = v.glow === 0 || v.glow === 2 ? v.glow : 1;
+    return { accent, glow };
+  } catch { return { accent: '', glow: 1 }; }
+}
+
+/** Republish only catalog.json (looks changed; no artwork changed). */
+export async function publishCatalog(store: Store, config: PublishConfig): Promise<string | undefined> {
+  if (config.dryRun || !config.token || !config.owner || !config.repository || !config.publicBase) return undefined;
+  const next = catalog(store);
+  const changed = await githubPut(config,'catalog.json',next,'Update Wreckshop venue looks');
+  if (changed) await verifyPublic(`${config.publicBase.replace(/\/$/,'')}/catalog.json`,sha(next));
+  return changed ? 'Published venue looks to the world catalog.' : undefined;
+}
+
+export function catalog(store: Store, replacement?: ReleaseRef, bannerReplacement?: BannerRelease, backdropReplacement?: BackdropRelease, boothReplacement?: BoothRelease, studioReplacement?: StudioRelease): Buffer {
+  // Clubs with no rep holding the Verified role, while the code gate is on (verify-gate.ts): code not accepted.
+  const locked = parseLocked(store.setting('verify_locked'));
+  const groups = store.groups().map(group => {
+    const active = replacement?.groupId === group.id ? replacement : store.activeRelease(group.id);
+    const studio = studioEntry(store, group, replacement?.groupId === group.id ? studioReplacement : undefined);
+    const venue = venueEntry(store, group);
+    return {
+      id: group.id, name: group.name, tier: group.tier, code: group.code,
+      // Public recognition is group-only; Discord identities remain private.
+      representatives: [],
+      enabled: !!group.enabled && !locked.has(group.id), vrchatGroupUrl: group.tier === 'premium' ? group.vrchatUrl : null,
+      atlasPoolIndex: active?.poolIndex ?? -1, revision: active?.revision ?? 0,
+      atlasBPoolIndex: active && ((replacement?.groupId === group.id && replacement.sha256B) || sheetBRelease(store,group.id,active.revision)) ? active.poolIndex : -1,
+      billboardPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && bannerReplacement ? bannerReplacement : liveBillboard(store,group.id))?.poolIndex ?? -1) : -1,
+      backdropPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && backdropReplacement ? backdropReplacement : liveBackdrop(store,group.id))?.poolIndex ?? -1) : -1,
+      // DJ booth front (booths/ pool), shown on both DJ booths while this group is active.
+      boothPoolIndex: group.enabled && group.tier === 'premium' ? ((replacement?.groupId === group.id && boothReplacement ? boothReplacement : liveBooth(store,group.id))?.poolIndex ?? -1) : -1,
+      // Headliner rides on top of premium: tier stays 'premium' for older worlds.
+      headliner: group.tier === 'premium' && group.level === 'headliner',
+      atlasSha256: active?.sha256 ?? '',
+      // The group's brand colour and glow (chosen on the website). The world may map it to its nearest accent.
+      ...lookOf(store, group.id),
+      // Venue Studio (Premium/Headliner with a saved theme only): applied once when the code is activated.
+      ...(studio ? { studio } : {}),
+      // Pass 23: the club's saved look from the world's finish library, applied by FBTVenueStudio on code activation.
+      ...(venue ? { venue } : {}),
+    };
+  });
+  return Buffer.from(JSON.stringify({ schema: 1, brand: 'Wreckshop Worlds',
+    publisher: 'TwerkTaco & Resolve', groups }));
+}
+
+async function githubGetSha(config: PublishConfig, path: string): Promise<string | undefined> {
+  const endpoint = `https://api.github.com/repos/${config.owner}/${config.repository}/contents/${path}?ref=${encodeURIComponent(config.branch)}`;
+  const response = await fetch(endpoint, { headers: {
+    Authorization: `Bearer ${config.token}`, Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  }, signal: AbortSignal.timeout(20_000) });
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw new Error(`GitHub content lookup failed: HTTP ${response.status}`);
+  const json = await response.json() as { sha: string };
+  return json.sha;
+}
+
+export async function githubPut(config: PublishConfig, path: string, bytes: Buffer, message: string): Promise<boolean> {
+  const existing = await githubGetSha(config,path);
+  const blobSha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  if (existing === blobSha) return false;
+  const endpoint = `https://api.github.com/repos/${config.owner}/${config.repository}/contents/${path}`;
+  const response = await fetch(endpoint, { method: 'PUT', headers: {
+    Authorization: `Bearer ${config.token}`, Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json'
+  }, body: JSON.stringify({ message, content: bytes.toString('base64'), branch: config.branch,
+    ...(existing ? { sha: existing } : {}) }), signal: AbortSignal.timeout(90_000) });
+  if (!response.ok) throw new Error(`GitHub upload failed: HTTP ${response.status}: ${(await response.text()).slice(0,300)}`);
+  return true;
+}
+
+async function publicMatches(url: string, expectedSha: string): Promise<boolean> {
+  try {
+    const verificationUrl = new URL(url); verificationUrl.searchParams.set('release',expectedSha);
+    const response = await fetch(verificationUrl, { cache: 'no-store', signal: AbortSignal.timeout(20_000) });
+    return response.ok && sha(Buffer.from(await response.arrayBuffer())) === expectedSha;
+  } catch { return false; }
+}
+
+// A committed file is not necessarily deployed: a Pages 5xx can leave it absent
+// indefinitely. A hidden marker triggers a fresh build with Contents permission,
+// without overwriting artwork or requiring broader Actions credentials.
+export async function publishFile(config: PublishConfig, path: string, bytes: Buffer, message: string): Promise<void> {
+  const changed = await githubPut(config,path,bytes,message);
+  const url = `${config.publicBase!.replace(/\/$/,'')}/${path}`;
+  const expected = sha(bytes);
+  if (!changed) {
+    if (await publicMatches(url,expected)) return;
+    await githubPut(config,'.pages-recovery.json',Buffer.from(JSON.stringify({
+      path, sha256: expected, requestedAt: new Date().toISOString()
+    })),`Retry Pages publication for ${path}`);
+  }
+  await verifyPublic(url,expected);
+}
+
+async function verifyPublic(url: string, expectedSha: string, attempts = 90): Promise<void> {
+  for (let n = 0; n < attempts; n++) {
+    if (await publicMatches(url,expectedSha)) return;
+    await new Promise(resolve => setTimeout(resolve, 10_000));
+  }
+  throw new Error(`Public asset did not match the release hash: ${url}`);
+}
+
+export async function publishGroup(store: Store, groupId: number, config: PublishConfig): Promise<string> {
+  const group = store.group(groupId);
+  if (!group) throw new Error('Group missing.');
+  const atlas = await buildAtlas(store, groupId, config.defaultsDir);
+  const atlasB = await buildAtlas(store, groupId, config.defaultsDir, 1);
+  const previous = store.activeRelease(groupId);
+  const sameArtwork = previous?.sha256 === atlas.sha256 && sheetBRelease(store,groupId,previous.revision)?.sha256B === atlasB.sha256;
+  const revision = sameArtwork ? previous!.revision :
+    ((store.db.prepare('SELECT COALESCE(MAX(revision),0) AS n FROM releases WHERE group_id=?')
+      .get(groupId) as { n: number }).n + 1);
+  const index = sameArtwork ? previous!.poolIndex : reserveUrl(store,'atlas',`${atlas.sha256}:${atlasB.sha256}`);
+  const relative = assetPath('atlas',index);
+  const relativeB = relative.replace(/\.png$/, '-b.png');
+  const publicBase = config.publicBase?.replace(/\/$/, '');
+  if (!publicBase) throw new Error('GITHUB_PUBLIC_BASE is required.');
+  const url = `${publicBase}/${relative}`;
+  const candidate: ReleaseRef = { groupId, revision, poolIndex: index,
+    sha256: atlas.sha256, publicUrl: sameArtwork ? previous!.publicUrl : url,
+    sha256B: atlasB.sha256, publicUrlB: `${publicBase}/${relativeB}` };
+  const banner = await prepareBillboard(store,groupId);
+  const backdrop = await prepareBackdrop(store,groupId);
+  const booth = await prepareBooth(store,groupId);
+  const studio = await prepareStudioTexture(store,groupId);
+  const nextCatalog = catalog(store,candidate,banner?.release,backdrop?.release,booth?.release,studio?.release);
+
+  if (config.dryRun) {
+    const out = join(config.dataDir,'dry-run');
+    await mkdir(out,{recursive:true});
+    await writeFile(join(out,`group-${groupId}-atlas.png`),atlas.bytes);
+    await writeFile(join(out,`group-${groupId}-atlas-b.png`),atlasB.bytes);
+    if(banner)await writeFile(join(out,`group-${groupId}-billboard.png`),banner.bytes);
+    if(backdrop)await writeFile(join(out,`group-${groupId}-backdrop.png`),backdrop.bytes);
+    if(booth)await writeFile(join(out,`group-${groupId}-booth.png`),booth.bytes);
+    if(studio)await writeFile(join(out,`group-${groupId}-studio.png`),studio.bytes);
+    await writeFile(join(out,'catalog.json'),nextCatalog);
+    return `dry-run: ${out}`;
+  }
+  if (!config.token || !config.owner || !config.repository)
+    throw new Error('GitHub credentials and repository settings are required.');
+  if (!sameArtwork) {
+    await publishFile(config,relative,atlas.bytes,`Publish Wreckshop group ${groupId} atlas r${revision}`);
+    await publishFile(config,relativeB,atlasB.bytes,`Publish Wreckshop group ${groupId} second atlas r${revision}`);
+  }
+  if(banner && liveBillboard(store,groupId)?.sha256 !== banner.release.sha256){
+    await publishFile(config,banner.release.path,banner.bytes,`Publish Wreckshop group ${groupId} billboard`);
+  }
+  if(backdrop && liveBackdrop(store,groupId)?.sha256 !== backdrop.release.sha256){
+    await publishFile(config,backdrop.release.path,backdrop.bytes,`Publish FBT Social group ${groupId} photo backdrop`);
+  }
+  if(booth && liveBooth(store,groupId)?.sha256 !== booth.release.sha256){
+    await publishFile(config,booth.release.path,booth.bytes,`Publish FBT Social group ${groupId} DJ booth front`);
+  }
+  if(studio && liveStudio(store,groupId)?.sha256 !== studio.release.sha256){
+    // Studio slots are overwritten in place (one per group), unlike the immutable artwork pools.
+    await publishFile(config,studio.release.path,studio.bytes,`Publish FBT Social studio texture slot ${studio.release.poolIndex}`);
+  }
+  const catalogPath = 'catalog.json';
+  // Assets were verified before activation. A slow CDN is not a failed write:
+  // rolling back here creates another build and repeatedly cancels deployment.
+  await publishFile(config,catalogPath,nextCatalog,`Activate Wreckshop group ${groupId} r${revision}`);
+  if(banner)store.setSetting(`billboard-live-${groupId}`,JSON.stringify(banner.release));
+  if(backdrop)store.setSetting(`backdrop-live-${groupId}`,JSON.stringify(backdrop.release));
+  if(booth)store.setSetting(`booth-live-${groupId}`,JSON.stringify(booth.release));
+  if(studio)store.setSetting(`studio-live-${groupId}`,JSON.stringify(studio.release));
+  store.db.transaction(() => {
+    if (!sameArtwork) store.recordRelease(groupId,revision,index,atlas.sha256,url);
+    store.setSetting(`poster-sheet-b-${groupId}-${revision}`,JSON.stringify({sha256B:atlasB.sha256,publicUrlB:candidate.publicUrlB}));
+  })();
+  store.db.prepare(`UPDATE submissions SET status='live',updated_at=CURRENT_TIMESTAMP
+    WHERE id IN (SELECT submission_id FROM assignments WHERE group_id=?)`).run(groupId);
+  return `live: group ${groupId}, revision ${revision}, pool ${index}`;
+}
+
+export async function processOneJob(store: Store, config: PublishConfig): Promise<string | undefined> {
+  const job = store.nextJob();
+  if (!job) return undefined;
+  store.markJob(job.id,'publishing');
+  try {
+    const message = await publishGroup(store,job.groupId,config);
+    store.markJob(job.id,config.dryRun ? 'dry-run' : 'live');
+    return message;
+  } catch (error) {
+    store.markJob(job.id,'failed',String(error));
+    store.db.prepare(`UPDATE submissions SET status='failed',updated_at=CURRENT_TIMESTAMP
+      WHERE id IN (SELECT submission_id FROM assignments WHERE group_id=?) AND status='approved'`)
+      .run(job.groupId);
+    throw error;
+  }
+}
+
+export async function activateRollback(store: Store, groupId: number, revision: number,
+  config: PublishConfig): Promise<string> {
+  const target = store.release(groupId,revision);
+  if (!target) throw new Error('Release not found.');
+  if (config.dryRun) throw new Error('Rollback publication requires live publishing mode.');
+  if (!config.token || !config.owner || !config.repository || !config.publicBase)
+    throw new Error('GitHub publishing settings are required.');
+  await verifyPublic(target.publicUrl,target.sha256);
+  const sheetB = sheetBRelease(store,groupId,revision);
+  if (sheetB) await verifyPublic(sheetB.publicUrlB,sheetB.sha256B);
+  const old = catalog(store);
+  const next = catalog(store,{groupId,revision,poolIndex:target.poolIndex,
+    sha256:target.sha256,publicUrl:target.publicUrl});
+  try {
+    await githubPut(config,'catalog.json',next,`Rollback Wreckshop group ${groupId} to r${revision}`);
+    await verifyPublic(`${config.publicBase.replace(/\/$/,'')}/catalog.json`,sha(next));
+  } catch (error) {
+    await githubPut(config,'catalog.json',old,'Restore Wreckshop catalog after failed rollback');
+    throw error;
+  }
+  store.revert(groupId,revision);
+  return `Rolled group ${groupId} back to revision ${revision}.`;
+}
