@@ -25,7 +25,7 @@ jobs:
         run: |
           mkdir _site
           cp ./*.json ./*.txt _site/
-          for folder in atlases billboards backdrops booths performers studio default-posters poster_uploads; do
+          for folder in atlases billboards backdrops booths logos sponsors performers studio default-posters poster_uploads; do
             if [ -d "$folder" ]; then cp -R "$folder" _site/; fi
           done
           touch _site/.nojekyll
