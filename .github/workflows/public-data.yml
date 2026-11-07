@@ -39,6 +39,8 @@ jobs:
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          # a healthy deploy takes under 3 min; give up on a hung one after 4 so the retry runs sooner
+          timeout: 240000
       - name: Back off after Pages failure
         if: steps.deployment.outcome == 'failure'
         run: sleep 30
@@ -49,6 +51,8 @@ jobs:
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          # a healthy deploy takes under 3 min; give up on a hung one after 4 so the retry runs sooner
+          timeout: 240000
       - name: Back off before final attempt
         if: steps.retry.outcome == 'failure'
         run: sleep 60
@@ -58,3 +62,5 @@ jobs:
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          # a healthy deploy takes under 3 min; give up on a hung one after 4 so the retry runs sooner
+          timeout: 240000
